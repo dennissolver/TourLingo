@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@livekit/components-react": "^2.0.0",
-    "@supabase/supabase-js": "^2.39.0",
     "@supabase/ssr": "^0.1.0",
+    "@supabase/supabase-js": "^2.39.0",
     "@tourlingo/api": "workspace:*",
     "@tourlingo/audio": "workspace:*",
     "@tourlingo/translation": "workspace:*",
@@ -20,6 +20,7 @@
     "@tourlingo/ui": "workspace:*",
     "date-fns": "^3.0.0",
     "livekit-client": "^2.0.0",
+    "livekit-server-sdk": "^2.15.0",
     "lucide-react": "^0.294.0",
     "next": "14.1.0",
     "qrcode.react": "^3.1.0",

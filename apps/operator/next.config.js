@@ -9,7 +9,6 @@ const nextConfig = {
     '@tourlingo/types',
   ],
   experimental: {
-    serverActions: true,
   },
 };
 
