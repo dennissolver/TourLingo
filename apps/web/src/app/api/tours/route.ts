@@ -8,7 +8,6 @@ function getSupabase() {
   );
 }
 
-// GET /api/tours?code=ABC123
 export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get('code');
 
@@ -44,7 +43,6 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// POST /api/tours - Create a new tour (operator only)
 export async function POST(req: NextRequest) {
   try {
     const { name, operatorId, maxGuests } = await req.json();
@@ -93,14 +91,3 @@ function generateAccessCode(): string {
   }
   return code;
 }
-```
-
----
-
-## Also Check Vercel Environment Variables
-
-Make sure **both** Vercel projects have:
-```
-NEXT_PUBLIC_SUPABASE_URL = https://qrcvpdteiepgnhuizvtp.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY = your-anon-key
-SUPABASE_SERVICE_ROLE_KEY = your-service-role-key
