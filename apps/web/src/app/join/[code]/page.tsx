@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { Check, ChevronRight, Headphones, AlertCircle } from 'lucide-react';
+import { Check, ChevronRight, Headphones, AlertCircle, RefreshCw, Volume2, VolumeX } from 'lucide-react';
 import { getTourByCode } from '@tourlingo/api';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
 
@@ -19,6 +19,9 @@ export default function JoinTourPage() {
   const [selectedLanguage, setSelectedLanguage] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [audioTested, setAudioTested] = useState(false);
+  const [audioFailed, setAudioFailed] = useState(false);
+  const [audioError, setAudioError] = useState('');
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
 
   // Load tour info
   useEffect(() => {
@@ -58,10 +61,52 @@ export default function JoinTourPage() {
   };
 
   const handleAudioTest = async () => {
-    // Play test audio
-    const audio = new Audio('/sounds/test-audio.mp3');
-    audio.play();
-    setAudioTested(true);
+    setIsPlayingAudio(true);
+    setAudioError('');
+    setAudioFailed(false);
+
+    try {
+      // Create audio context to generate a test tone (no external file needed)
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      const audioContext = new AudioContext();
+
+      // Create oscillator for test tone
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+
+      oscillator.frequency.value = 440; // A4 note
+      oscillator.type = 'sine';
+
+      // Fade in and out
+      gainNode.gain.setValueAtTime(0, audioContext.currentTime);
+      gainNode.gain.linearRampToValueAtTime(0.3, audioContext.currentTime + 0.1);
+      gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 1);
+
+      oscillator.start(audioContext.currentTime);
+      oscillator.stop(audioContext.currentTime + 1);
+
+      // Wait for tone to finish
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
+      setAudioTested(true);
+      setIsPlayingAudio(false);
+    } catch (err: any) {
+      console.error('Audio test failed:', err);
+      setAudioError(err.message || 'Failed to play test audio');
+      setAudioFailed(true);
+      setIsPlayingAudio(false);
+    }
+  };
+
+  const handleAudioSuccess = () => {
+    setStep('ready');
+  };
+
+  const handleAudioFailure = () => {
+    setAudioFailed(true);
   };
 
   const handleJoinTour = () => {
@@ -180,43 +225,120 @@ export default function JoinTourPage() {
         {step === 'audio' && (
           <div>
             <h2 className="text-xl font-semibold text-gray-900 mb-2">
-              Connect your earphones
+              Test your audio
             </h2>
             <p className="text-gray-600 mb-6">
-              For the best experience, use earphones or earbuds.
+              Make sure you can hear the guide. Use earphones for best experience.
             </p>
 
             <div className="card mb-6">
               <div className="flex items-center justify-center mb-4">
                 <Headphones className="w-16 h-16 text-primary-600" />
               </div>
+
+              {/* Test Audio Button */}
               <button
                 onClick={handleAudioTest}
-                className="btn btn-secondary w-full"
+                disabled={isPlayingAudio}
+                className="btn btn-secondary w-full mb-3"
               >
-                {audioTested ? (
+                {isPlayingAudio ? (
                   <>
-                    <Check className="w-5 h-5 mr-2 text-green-600" />
+                    <Volume2 className="w-5 h-5 mr-2 animate-pulse" />
+                    Playing...
+                  </>
+                ) : audioTested ? (
+                  <>
+                    <RefreshCw className="w-5 h-5 mr-2" />
                     Play Again
                   </>
                 ) : (
-                  'Test Audio'
+                  <>
+                    <Volume2 className="w-5 h-5 mr-2" />
+                    Play Test Sound
+                  </>
                 )}
               </button>
-              {audioTested && (
-                <p className="text-sm text-green-600 text-center mt-2">
-                  ✓ Can you hear the test audio?
-                </p>
+
+              {/* Audio Error Message */}
+              {audioError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg mb-3">
+                  <p className="text-sm text-red-600">{audioError}</p>
+                </div>
+              )}
+
+              {/* Success/Failure Options after test */}
+              {audioTested && !audioFailed && (
+                <div className="space-y-2">
+                  <p className="text-sm text-gray-600 text-center mb-3">
+                    Did you hear the test sound?
+                  </p>
+                  <button
+                    onClick={handleAudioSuccess}
+                    className="btn btn-primary w-full"
+                  >
+                    <Check className="w-5 h-5 mr-2" />
+                    Yes, I heard it
+                  </button>
+                  <button
+                    onClick={handleAudioFailure}
+                    className="btn btn-secondary w-full"
+                  >
+                    <VolumeX className="w-5 h-5 mr-2" />
+                    No, I didn't hear it
+                  </button>
+                </div>
+              )}
+
+              {/* Troubleshooting Panel */}
+              {audioFailed && (
+                <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <h3 className="font-medium text-yellow-800 mb-2">
+                    Troubleshooting
+                  </h3>
+                  <ul className="text-sm text-yellow-700 space-y-2 mb-4">
+                    <li>• Check your device volume is turned up</li>
+                    <li>• Make sure earphones/speakers are connected</li>
+                    <li>• Try a different browser (Chrome recommended)</li>
+                    <li>• Check if your browser has permission to play audio</li>
+                    <li>• On iPhone, make sure silent mode is off</li>
+                  </ul>
+
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => {
+                        setAudioFailed(false);
+                        setAudioTested(false);
+                        setAudioError('');
+                      }}
+                      className="btn btn-secondary w-full"
+                    >
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      Try Again
+                    </button>
+                    <button
+                      onClick={() => setStep('ready')}
+                      className="btn btn-primary w-full"
+                    >
+                      Continue Anyway
+                    </button>
+                    <p className="text-xs text-center text-gray-500 mt-2">
+                      You may have audio issues during the tour
+                    </p>
+                  </div>
+                </div>
               )}
             </div>
 
-            <button
-              onClick={() => setStep('ready')}
-              className="btn btn-primary btn-large w-full"
-            >
-              {audioTested ? 'Yes, I Can Hear' : 'Skip Test'}
-              <ChevronRight className="w-5 h-5 ml-2" />
-            </button>
+            {/* Skip option (only before testing) */}
+            {!audioTested && !audioFailed && (
+              <button
+                onClick={() => setStep('ready')}
+                className="text-sm text-gray-500 hover:text-gray-700 w-full text-center"
+              >
+                Skip audio test
+              </button>
+            )}
           </div>
         )}
 

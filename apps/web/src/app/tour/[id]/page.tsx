@@ -1,25 +1,24 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   LiveKitRoom,
   useRoomContext,
   useTracks,
   useParticipants,
+  AudioTrack,
 } from '@livekit/components-react';
-import { Track, RoomEvent } from 'livekit-client';
+import { Track, RemoteTrack, RemoteTrackPublication } from 'livekit-client';
 import {
   Mic,
   MicOff,
   Volume2,
   VolumeX,
-  MessageCircle,
   Users,
   LogOut,
   X,
 } from 'lucide-react';
-import { useTourStore } from '@/stores/tourStore';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
 
 export default function TourRoomPage() {
@@ -101,7 +100,7 @@ export default function TourRoomPage() {
       token={token}
       serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL}
       connect={true}
-      audio={false}
+      audio={true}
       video={false}
       onDisconnected={() => router.push('/')}
     >
@@ -114,21 +113,47 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
   const router = useRouter();
   const room = useRoomContext();
   const participants = useParticipants();
-  const tracks = useTracks([Track.Source.Microphone]);
 
-  const [isMuted, setIsMuted] = useState(true);
+  // Get all audio tracks (microphone tracks from operators)
+  const audioTracks = useTracks([Track.Source.Microphone]);
+
+  const [isMuted, setIsMuted] = useState(false);
   const [isAskingQuestion, setIsAskingQuestion] = useState(false);
   const [showParticipants, setShowParticipants] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
-  const [transcript, setTranscript] = useState<string[]>([]);
+  const [isOperatorSpeaking, setIsOperatorSpeaking] = useState(false);
+
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   const language = SUPPORTED_LANGUAGES.find((l) => l.code === guestInfo.language);
 
-  // Handle incoming translated audio
+  // Find operator's audio track
+  const operatorTrack = audioTracks.find((trackRef) => {
+    const metadata = trackRef.participant?.metadata;
+    if (metadata) {
+      try {
+        const meta = JSON.parse(metadata);
+        return meta.isOperator === true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  });
+
+  // Track if operator is speaking
   useEffect(() => {
-    // Subscribe to translated audio track for this guest's language
-    // Implementation depends on translation pipeline setup
-  }, [guestInfo.language]);
+    if (operatorTrack?.publication?.track) {
+      setIsOperatorSpeaking(true);
+    } else {
+      setIsOperatorSpeaking(false);
+    }
+  }, [operatorTrack]);
+
+  // Handle mute/unmute
+  const handleToggleMute = () => {
+    setIsMuted(!isMuted);
+  };
 
   const handleAskQuestion = async () => {
     if (isAskingQuestion) {
@@ -149,19 +174,38 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
   };
 
   const operatorCount = participants.filter(
-    (p) => JSON.parse(p.metadata || '{}').isOperator
+    (p) => {
+      try {
+        return JSON.parse(p.metadata || '{}').isOperator;
+      } catch {
+        return false;
+      }
+    }
   ).length;
 
   const guestCount = participants.length - operatorCount;
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col">
+      {/* Hidden audio elements for all audio tracks */}
+      <div className="hidden">
+        {audioTracks.map((trackRef) => (
+          <AudioTrack
+            key={trackRef.publication?.trackSid}
+            trackRef={trackRef}
+            volume={isMuted ? 0 : 1}
+          />
+        ))}
+      </div>
+
       {/* Header */}
       <header className="bg-gray-800 px-4 py-3 flex items-center justify-between">
         <div>
           <div className="flex items-center space-x-2">
-            <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-            <span className="text-sm text-gray-300">Live</span>
+            <span className={`w-2 h-2 rounded-full ${isOperatorSpeaking ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`} />
+            <span className="text-sm text-gray-300">
+              {isOperatorSpeaking ? 'Guide Speaking' : 'Connected'}
+            </span>
           </div>
           <h1 className="font-semibold">Tour</h1>
         </div>
@@ -176,36 +220,42 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
         {/* Audio Visualization */}
         <div className="flex-1 flex items-center justify-center p-6">
           <div className="text-center">
-            <div className="w-32 h-32 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
+            <div className={`w-32 h-32 rounded-full flex items-center justify-center mx-auto mb-4 transition-colors ${
+              isOperatorSpeaking && !isMuted 
+                ? 'bg-primary-600 animate-pulse' 
+                : 'bg-gray-800'
+            }`}>
               {isMuted ? (
                 <VolumeX className="w-16 h-16 text-gray-600" />
+              ) : isOperatorSpeaking ? (
+                <Volume2 className="w-16 h-16 text-white animate-pulse" />
               ) : (
-                <Volume2 className="w-16 h-16 text-primary-400 animate-pulse" />
+                <Volume2 className="w-16 h-16 text-gray-600" />
               )}
             </div>
             <p className="text-gray-400">
-              {isMuted ? 'Audio muted' : 'Listening to guide...'}
+              {isMuted
+                ? 'Audio muted - tap speaker to unmute'
+                : isOperatorSpeaking
+                  ? 'Listening to guide...'
+                  : 'Waiting for guide to speak...'}
             </p>
+            {operatorCount === 0 && (
+              <p className="text-yellow-500 mt-2 text-sm">
+                Guide not connected yet
+              </p>
+            )}
           </div>
         </div>
-
-        {/* Transcript (optional) */}
-        {transcript.length > 0 && (
-          <div className="bg-gray-800 mx-4 mb-4 rounded-lg p-4 max-h-32 overflow-y-auto">
-            <p className="text-sm text-gray-300">
-              {transcript[transcript.length - 1]}
-            </p>
-          </div>
-        )}
 
         {/* Controls */}
         <div className="bg-gray-800 p-4 safe-bottom">
           <div className="flex items-center justify-around max-w-md mx-auto">
             {/* Mute/Unmute Audio */}
             <button
-              onClick={() => setIsMuted(!isMuted)}
-              className={`w-14 h-14 rounded-full flex items-center justify-center ${
-                isMuted ? 'bg-gray-700' : 'bg-primary-600'
+              onClick={handleToggleMute}
+              className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${
+                isMuted ? 'bg-red-600' : 'bg-primary-600'
               }`}
             >
               {isMuted ? (
@@ -218,10 +268,10 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
             {/* Ask Question */}
             <button
               onClick={handleAskQuestion}
-              className={`w-16 h-16 rounded-full flex items-center justify-center ${
+              className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors ${
                 isAskingQuestion
                   ? 'bg-red-600 animate-pulse'
-                  : 'bg-primary-600'
+                  : 'bg-gray-700 hover:bg-gray-600'
               }`}
             >
               {isAskingQuestion ? (
@@ -234,7 +284,7 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
             {/* Participants */}
             <button
               onClick={() => setShowParticipants(true)}
-              className="w-14 h-14 rounded-full bg-gray-700 flex items-center justify-center relative"
+              className="w-14 h-14 rounded-full bg-gray-700 flex items-center justify-center relative hover:bg-gray-600 transition-colors"
             >
               <Users className="w-6 h-6" />
               <span className="absolute -top-1 -right-1 w-5 h-5 bg-primary-600 rounded-full text-xs flex items-center justify-center">
@@ -245,7 +295,7 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
             {/* Leave */}
             <button
               onClick={() => setShowLeaveConfirm(true)}
-              className="w-14 h-14 rounded-full bg-gray-700 flex items-center justify-center"
+              className="w-14 h-14 rounded-full bg-gray-700 flex items-center justify-center hover:bg-gray-600 transition-colors"
             >
               <LogOut className="w-6 h-6" />
             </button>
@@ -253,7 +303,7 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
 
           {isAskingQuestion && (
             <p className="text-center text-sm text-red-400 mt-3">
-              Tap microphone to stop speaking
+              Speaking to guide - tap microphone to stop
             </p>
           )}
         </div>
@@ -271,7 +321,10 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
             </div>
             <div className="space-y-2">
               {participants.map((p) => {
-                const meta = JSON.parse(p.metadata || '{}');
+                let meta = { language: 'en', isOperator: false };
+                try {
+                  meta = JSON.parse(p.metadata || '{}');
+                } catch {}
                 const lang = SUPPORTED_LANGUAGES.find((l) => l.code === meta.language);
                 return (
                   <div
