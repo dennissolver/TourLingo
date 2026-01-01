@@ -5,7 +5,7 @@ export async function POST(req: NextRequest) {
   try {
     const { tourId, participantName, language, isOperator } = await req.json();
 
-    if (!tourId || !participantName || !language) {
+    if (!tourId || !participantName) {
       return NextResponse.json(
         { error: 'Missing required fields' },
         { status: 400 }
@@ -16,27 +16,33 @@ export async function POST(req: NextRequest) {
     const apiSecret = process.env.LIVEKIT_API_SECRET;
 
     if (!apiKey || !apiSecret) {
+      console.error('LiveKit credentials not configured');
       return NextResponse.json(
         { error: 'LiveKit not configured' },
         { status: 500 }
       );
     }
 
+    // Create unique identity for participant
+    const identity = `${isOperator ? 'operator' : 'guest'}-${participantName.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+
     // Create access token
     const token = new AccessToken(apiKey, apiSecret, {
-      identity: `${participantName.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
+      identity,
       name: participantName,
       metadata: JSON.stringify({
-        language,
+        language: language || 'en',
         isOperator: isOperator || false,
       }),
     });
 
     // Grant permissions
+    // Both operators and guests can publish audio (guests need this to ask questions)
+    // Both can subscribe to hear each other
     token.addGrant({
       room: `tour-${tourId}`,
       roomJoin: true,
-      canPublish: isOperator || false, // Only operators can publish by default
+      canPublish: true,
       canSubscribe: true,
       canPublishData: true,
     });
@@ -45,7 +51,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ token: jwt });
   } catch (error) {
-    console.error('Error generating token:', error);
+    console.error('Error generating LiveKit token:', error);
     return NextResponse.json(
       { error: 'Failed to generate token' },
       { status: 500 }
