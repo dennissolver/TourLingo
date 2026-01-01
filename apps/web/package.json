@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@livekit/components-react": "^2.0.0",
+    "@supabase/ssr": "^0.1.0",
     "@supabase/supabase-js": "^2.39.0",
     "@tourlingo/api": "workspace:*",
     "@tourlingo/audio": "workspace:*",
