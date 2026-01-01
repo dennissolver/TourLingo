@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import {
   LiveKitRoom,
@@ -8,6 +8,7 @@ import {
   useLocalParticipant,
   useParticipants,
 } from '@livekit/components-react';
+import { DataPacket_Kind, RoomEvent } from 'livekit-client';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Mic,
@@ -16,9 +17,10 @@ import {
   Copy,
   Check,
   Square,
-  MessageCircle,
+  Globe,
   ChevronRight,
   X,
+  Loader2,
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
 import { createBrowserClient } from '@supabase/ssr';
@@ -45,7 +47,6 @@ export default function LiveTourPage() {
       try {
         const supabase = getSupabase();
 
-        // Fetch tour details from Supabase
         const { data: tourData, error: tourError } = await supabase
           .from('tours')
           .select('*')
@@ -67,7 +68,6 @@ export default function LiveTourPage() {
           maxGuests: tourData.max_guests,
         });
 
-        // Update tour status to 'live' if it's still 'created'
         if (tourData.status === 'created') {
           await supabase
             .from('tours')
@@ -78,13 +78,12 @@ export default function LiveTourPage() {
             .eq('id', tourId);
         }
 
-        // Get LiveKit token
         const res = await fetch('/api/livekit/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             tourId,
-            participantName: 'Tim (Guide)',
+            participantName: 'Guide',
             language: 'en',
             isOperator: true,
           }),
@@ -168,32 +167,178 @@ function LiveTourContent({ tour }: { tour: any }) {
   const participants = useParticipants();
 
   const [isBroadcasting, setIsBroadcasting] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [selectedGuest, setSelectedGuest] = useState<string | null>(null);
+  const [lastTranscript, setLastTranscript] = useState('');
+  const [translationError, setTranslationError] = useState<string | null>(null);
 
-  const joinUrl = `${process.env.NEXT_PUBLIC_APP_URL}/join/${tour.accessCode}`;
+  // Audio recording refs
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const joinUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://tour-lingo.vercel.app'}/join/${tour.accessCode}`;
 
   const guests = participants.filter((p) => {
-    const meta = JSON.parse(p.metadata || '{}');
-    return !meta.isOperator;
+    try {
+      const meta = JSON.parse(p.metadata || '{}');
+      return !meta.isOperator;
+    } catch {
+      return true;
+    }
   });
 
   const guestsByLanguage = guests.reduce((acc, guest) => {
-    const meta = JSON.parse(guest.metadata || '{}');
-    const lang = meta.language || 'en';
-    if (!acc[lang]) acc[lang] = [];
-    acc[lang].push(guest);
+    try {
+      const meta = JSON.parse(guest.metadata || '{}');
+      const lang = meta.language || 'en';
+      if (!acc[lang]) acc[lang] = [];
+      acc[lang].push(guest);
+    } catch {
+      if (!acc['en']) acc['en'] = [];
+      acc['en'].push(guest);
+    }
     return acc;
   }, {} as Record<string, any[]>);
 
+  // Get unique languages from connected guests
+  const activeLanguages = Object.keys(guestsByLanguage);
+
+  // Process and send translated audio to guests
+  const processAndSendTranslation = useCallback(async (audioBlob: Blob) => {
+    if (audioBlob.size < 1000) return; // Skip tiny chunks
+
+    setIsTranslating(true);
+    setTranslationError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'audio.webm');
+      formData.append('sourceLanguage', 'en');
+      formData.append('targetLanguages', activeLanguages.join(','));
+      formData.append('generateAudio', 'true');
+
+      const response = await fetch('/api/translate/audio', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Translation failed');
+      }
+
+      const result = await response.json();
+
+      if (result.originalText) {
+        setLastTranscript(result.originalText);
+      }
+
+      // Send translated audio to guests via LiveKit data channel
+      // Each guest receives only their language's audio
+      for (const [language, translation] of Object.entries(result.translations)) {
+        if ((translation as any).audioUrl) {
+          const message = JSON.stringify({
+            type: 'translated_audio',
+            language,
+            text: (translation as any).text,
+            audioUrl: (translation as any).audioUrl,
+            timestamp: Date.now(),
+          });
+
+          // Send to all participants (guests will filter by their language)
+          const encoder = new TextEncoder();
+          const data = encoder.encode(message);
+
+          await room.localParticipant.publishData(data, {
+            reliable: true,
+          });
+        }
+      }
+
+      console.log(`Translation sent: ${result.originalText?.substring(0, 30)}... (${result.processingTimeMs}ms)`);
+    } catch (error) {
+      console.error('Translation error:', error);
+      setTranslationError(error instanceof Error ? error.message : 'Translation failed');
+    } finally {
+      setIsTranslating(false);
+    }
+  }, [activeLanguages, room]);
+
+  // Start recording and translation
+  const startBroadcasting = useCallback(async () => {
+    try {
+      // Enable microphone in LiveKit (for raw audio fallback)
+      await localParticipant.setMicrophoneEnabled(true);
+
+      // Get microphone stream for recording
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const mediaRecorder = new MediaRecorder(stream, {
+        mimeType: 'audio/webm;codecs=opus',
+      });
+
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        if (audioChunksRef.current.length > 0) {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          processAndSendTranslation(audioBlob);
+          audioChunksRef.current = [];
+        }
+      };
+
+      // Start recording
+      mediaRecorder.start();
+
+      // Process audio every 3 seconds for translation
+      recordingIntervalRef.current = setInterval(() => {
+        if (mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+          mediaRecorder.start();
+        }
+      }, 3000);
+
+      setIsBroadcasting(true);
+    } catch (error) {
+      console.error('Failed to start broadcasting:', error);
+      setTranslationError('Failed to access microphone');
+    }
+  }, [localParticipant, processAndSendTranslation]);
+
+  // Stop recording and translation
+  const stopBroadcasting = useCallback(async () => {
+    // Stop interval
+    if (recordingIntervalRef.current) {
+      clearInterval(recordingIntervalRef.current);
+      recordingIntervalRef.current = null;
+    }
+
+    // Stop media recorder
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+
+    // Disable microphone
+    await localParticipant.setMicrophoneEnabled(false);
+
+    setIsBroadcasting(false);
+  }, [localParticipant]);
+
   const handleBroadcastToggle = async () => {
     if (isBroadcasting) {
-      await localParticipant.setMicrophoneEnabled(false);
-      setIsBroadcasting(false);
+      await stopBroadcasting();
     } else {
-      await localParticipant.setMicrophoneEnabled(true);
-      setIsBroadcasting(true);
+      await startBroadcasting();
     }
   };
 
@@ -205,9 +350,9 @@ function LiveTourContent({ tour }: { tour: any }) {
 
   const handleEndTour = async () => {
     try {
-      const supabase = getSupabase();
+      await stopBroadcasting();
 
-      // Update tour status in Supabase
+      const supabase = getSupabase();
       await supabase
         .from('tours')
         .update({
@@ -224,6 +369,18 @@ function LiveTourContent({ tour }: { tour: any }) {
       router.push('/dashboard/tours');
     }
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current);
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+    };
+  }, []);
 
   return (
     <div className="min-h-[calc(100vh-8rem)] flex flex-col lg:flex-row gap-6">
@@ -253,11 +410,12 @@ function LiveTourContent({ tour }: { tour: any }) {
           {/* Big Broadcast Button */}
           <button
             onClick={handleBroadcastToggle}
+            disabled={isTranslating && !isBroadcasting}
             className={`w-full py-8 rounded-xl flex flex-col items-center justify-center transition-colors ${
               isBroadcasting
                 ? 'bg-red-600 hover:bg-red-700 text-white'
                 : 'bg-primary-600 hover:bg-primary-700 text-white'
-            }`}
+            } disabled:opacity-50`}
           >
             {isBroadcasting ? (
               <>
@@ -272,12 +430,60 @@ function LiveTourContent({ tour }: { tour: any }) {
             )}
           </button>
 
-          <p className="text-center text-sm text-gray-500 mt-4">
-            {isBroadcasting
-              ? 'Your voice is being translated to all guests'
-              : 'Press to start speaking to your guests'}
-          </p>
+          {/* Translation Status */}
+          <div className="mt-4 space-y-2">
+            {isTranslating && (
+              <div className="flex items-center justify-center text-sm text-primary-600">
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Translating...
+              </div>
+            )}
+
+            {translationError && (
+              <div className="text-sm text-red-600 text-center">
+                {translationError}
+              </div>
+            )}
+
+            {lastTranscript && (
+              <div className="p-3 bg-gray-50 rounded-lg">
+                <p className="text-xs text-gray-500 mb-1">Last transcript:</p>
+                <p className="text-sm text-gray-700">{lastTranscript}</p>
+              </div>
+            )}
+
+            <p className="text-center text-sm text-gray-500">
+              {isBroadcasting
+                ? `Translating to ${activeLanguages.length} language${activeLanguages.length !== 1 ? 's' : ''}`
+                : 'Press to start speaking to your guests'}
+            </p>
+          </div>
         </div>
+
+        {/* Active Languages */}
+        {activeLanguages.length > 0 && (
+          <div className="card">
+            <div className="flex items-center space-x-2 mb-3">
+              <Globe className="w-4 h-4 text-gray-400" />
+              <h3 className="text-sm font-medium text-gray-700">Active Languages</h3>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {activeLanguages.map((lang) => {
+                const language = SUPPORTED_LANGUAGES.find((l) => l.code === lang);
+                return (
+                  <span
+                    key={lang}
+                    className="inline-flex items-center px-3 py-1 bg-primary-50 text-primary-700 rounded-full text-sm"
+                  >
+                    <span className="mr-1">{language?.flag || '🌐'}</span>
+                    {language?.name || lang}
+                    <span className="ml-1 text-xs">({guestsByLanguage[lang]?.length || 0})</span>
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Quick Actions */}
         <div className="grid grid-cols-2 gap-4">
@@ -288,8 +494,8 @@ function LiveTourContent({ tour }: { tour: any }) {
             <Square className="w-5 h-5 mb-1" />
             <span>End Tour</span>
           </button>
-          <button className="btn btn-secondary py-4 flex-col">
-            <MessageCircle className="w-5 h-5 mb-1" />
+          <button className="btn btn-secondary py-4 flex-col opacity-50" disabled>
+            <Globe className="w-5 h-5 mb-1" />
             <span>Announcements</span>
           </button>
         </div>
@@ -389,22 +595,24 @@ function LiveTourContent({ tour }: { tour: any }) {
         </div>
       )}
 
-      {/* Private Chat Modal */}
+      {/* Guest Info Modal */}
       {selectedGuest && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl p-6 max-w-sm w-full">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">Private Chat</h2>
+              <h2 className="text-lg font-semibold text-gray-900">Guest Info</h2>
               <button onClick={() => setSelectedGuest(null)}>
                 <X className="w-5 h-5 text-gray-500" />
               </button>
             </div>
             <p className="text-gray-600 mb-4">
-              Start a private conversation with this guest.
+              Private messaging coming soon.
             </p>
-            <button className="btn btn-primary w-full">
-              <Mic className="w-5 h-5 mr-2" />
-              Start Private Chat
+            <button
+              onClick={() => setSelectedGuest(null)}
+              className="btn btn-primary w-full"
+            >
+              Close
             </button>
           </div>
         </div>
