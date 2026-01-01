@@ -7,7 +7,10 @@ import {
   useRoomContext,
   useLocalParticipant,
   useParticipants,
+  useTracks,
+  AudioTrack,
 } from '@livekit/components-react';
+import { Track, RoomEvent } from 'livekit-client';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Mic,
@@ -20,6 +23,8 @@ import {
   ChevronRight,
   X,
   Loader2,
+  Volume2,
+  MessageCircle,
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
 import { createBrowserClient } from '@supabase/ssr';
@@ -168,6 +173,9 @@ function LiveTourContent({ tour }: { tour: any }) {
   const { localParticipant } = useLocalParticipant();
   const participants = useParticipants();
 
+  // Get all audio tracks from guests
+  const audioTracks = useTracks([Track.Source.Microphone]);
+
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -175,6 +183,7 @@ function LiveTourContent({ tour }: { tour: any }) {
   const [selectedGuest, setSelectedGuest] = useState<string | null>(null);
   const [lastTranscript, setLastTranscript] = useState('');
   const [translationError, setTranslationError] = useState<string | null>(null);
+  const [speakingGuests, setSpeakingGuests] = useState<Set<string>>(new Set());
 
   // Audio recording refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -192,6 +201,30 @@ function LiveTourContent({ tour }: { tour: any }) {
     }
   });
 
+  // Get guest audio tracks (non-operator)
+  const guestAudioTracks = audioTracks.filter((trackRef) => {
+    const participant = trackRef.participant;
+    try {
+      const meta = JSON.parse(participant.metadata || '{}');
+      return !meta.isOperator;
+    } catch {
+      return true;
+    }
+  });
+
+  // Track which guests are speaking based on audio tracks
+  useEffect(() => {
+    const newSpeakingGuests = new Set<string>();
+
+    guestAudioTracks.forEach((trackRef) => {
+      if (trackRef.publication?.isMuted === false) {
+        newSpeakingGuests.add(trackRef.participant.identity);
+      }
+    });
+
+    setSpeakingGuests(newSpeakingGuests);
+  }, [guestAudioTracks]);
+
   const guestsByLanguage = guests.reduce((acc, guest) => {
     try {
       const meta = JSON.parse(guest.metadata || '{}');
@@ -207,6 +240,23 @@ function LiveTourContent({ tour }: { tour: any }) {
 
   // Get unique languages from connected guests
   const activeLanguages = Object.keys(guestsByLanguage);
+
+  // Get speaking guest info
+  const speakingGuestInfo = Array.from(speakingGuests).map(identity => {
+    const guest = guests.find(g => g.identity === identity);
+    if (!guest) return null;
+    try {
+      const meta = JSON.parse(guest.metadata || '{}');
+      const lang = SUPPORTED_LANGUAGES.find(l => l.code === meta.language);
+      return {
+        name: guest.name || identity,
+        language: lang?.name || meta.language,
+        flag: lang?.flag || '🌐',
+      };
+    } catch {
+      return { name: guest.name || identity, language: 'Unknown', flag: '🌐' };
+    }
+  }).filter(Boolean);
 
   // Send data in chunks to avoid LiveKit's 64KB limit
   const sendChunkedData = useCallback(async (data: object) => {
@@ -418,8 +468,40 @@ function LiveTourContent({ tour }: { tour: any }) {
 
   return (
     <div className="min-h-[calc(100vh-8rem)] flex flex-col lg:flex-row gap-6">
+      {/* Play guest audio for the operator to hear */}
+      <div className="hidden">
+        {guestAudioTracks.map((trackRef) => (
+          <AudioTrack
+            key={trackRef.publication?.trackSid}
+            trackRef={trackRef}
+            volume={1}
+          />
+        ))}
+      </div>
+
       {/* Main Control Panel */}
       <div className="flex-1 space-y-6">
+        {/* Guest Speaking Alert */}
+        {speakingGuestInfo.length > 0 && (
+          <div className="bg-yellow-50 border border-yellow-300 rounded-xl p-4 animate-pulse">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 bg-yellow-400 rounded-full flex items-center justify-center">
+                <MessageCircle className="w-5 h-5 text-yellow-900" />
+              </div>
+              <div>
+                <p className="font-semibold text-yellow-900">Guest Speaking!</p>
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {speakingGuestInfo.map((guest, i) => (
+                    <span key={i} className="text-sm text-yellow-800 bg-yellow-200 px-2 py-0.5 rounded-full">
+                      {guest?.flag} {guest?.name} ({guest?.language})
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Broadcast Control */}
         <div className="card">
           <div className="flex items-center justify-between mb-6">
@@ -587,16 +669,30 @@ function LiveTourContent({ tour }: { tour: any }) {
                       </span>
                     </div>
                     <div className="space-y-1 pl-7">
-                      {langGuests.map((guest: any) => (
-                        <button
-                          key={guest.identity}
-                          onClick={() => setSelectedGuest(guest.identity)}
-                          className="w-full flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-100 text-sm"
-                        >
-                          <span className="truncate">{guest.name}</span>
-                          <ChevronRight className="w-4 h-4 text-gray-400" />
-                        </button>
-                      ))}
+                      {langGuests.map((guest: any) => {
+                        const isSpeaking = speakingGuests.has(guest.identity);
+                        return (
+                          <button
+                            key={guest.identity}
+                            onClick={() => setSelectedGuest(guest.identity)}
+                            className={`w-full flex items-center justify-between py-1.5 px-2 rounded text-sm transition-colors ${
+                              isSpeaking 
+                                ? 'bg-yellow-100 border border-yellow-300' 
+                                : 'hover:bg-gray-100'
+                            }`}
+                          >
+                            <div className="flex items-center space-x-2">
+                              {isSpeaking && (
+                                <Volume2 className="w-4 h-4 text-yellow-600 animate-pulse" />
+                              )}
+                              <span className={isSpeaking ? 'text-yellow-800 font-medium' : ''}>
+                                {guest.name}
+                              </span>
+                            </div>
+                            <ChevronRight className="w-4 h-4 text-gray-400" />
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 );

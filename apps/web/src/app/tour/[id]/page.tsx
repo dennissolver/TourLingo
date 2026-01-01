@@ -19,6 +19,7 @@ import {
   LogOut,
   X,
   Globe,
+  Send,
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
 
@@ -135,16 +136,19 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
   const audioTracks = useTracks([Track.Source.Microphone]);
 
   const [isMuted, setIsMuted] = useState(false);
-  const [isAskingQuestion, setIsAskingQuestion] = useState(false);
+  const [isTalking, setIsTalking] = useState(false);
+  const [talkingSeconds, setTalkingSeconds] = useState(0);
   const [showParticipants, setShowParticipants] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [isReceivingTranslation, setIsReceivingTranslation] = useState(false);
   const [lastTranscript, setLastTranscript] = useState('');
   const [audioQueue, setAudioQueue] = useState<string[]>([]);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [messageSent, setMessageSent] = useState(false);
 
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const chunkBufferRef = useRef<Map<string, string[]>>(new Map());
+  const talkingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const myLanguage = guestInfo.language;
 
   const language = SUPPORTED_LANGUAGES.find((l) => l.code === myLanguage);
@@ -218,7 +222,6 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
   // Clean up old incomplete chunk buffers periodically
   useEffect(() => {
     const cleanup = setInterval(() => {
-      // Clear any buffers older than 30 seconds (based on timestamp in messageId)
       const now = Date.now();
       for (const [messageId] of chunkBufferRef.current) {
         const timestamp = parseInt(messageId, 10);
@@ -269,24 +272,63 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
     setIsMuted(!isMuted);
   }, [isMuted]);
 
-  const handleAskQuestion = async () => {
-    if (isAskingQuestion) {
-      await room.localParticipant.setMicrophoneEnabled(false);
-      setIsAskingQuestion(false);
-    } else {
+  // Start talking to guide
+  const startTalking = async () => {
+    try {
       await room.localParticipant.setMicrophoneEnabled(true);
-      setIsAskingQuestion(true);
+      setIsTalking(true);
+      setTalkingSeconds(0);
+      setMessageSent(false);
+
+      // Start timer
+      talkingTimerRef.current = setInterval(() => {
+        setTalkingSeconds(s => s + 1);
+      }, 1000);
+    } catch (error) {
+      console.error('Failed to enable microphone:', error);
     }
+  };
+
+  // Stop talking and send
+  const stopTalking = async () => {
+    await room.localParticipant.setMicrophoneEnabled(false);
+    setIsTalking(false);
+
+    // Clear timer
+    if (talkingTimerRef.current) {
+      clearInterval(talkingTimerRef.current);
+      talkingTimerRef.current = null;
+    }
+
+    // Show sent confirmation
+    if (talkingSeconds > 0) {
+      setMessageSent(true);
+      setTimeout(() => setMessageSent(false), 3000);
+    }
+
+    setTalkingSeconds(0);
   };
 
   const handleLeave = () => {
     if (audioPlayerRef.current) {
       audioPlayerRef.current.pause();
     }
+    if (talkingTimerRef.current) {
+      clearInterval(talkingTimerRef.current);
+    }
     room.disconnect();
     sessionStorage.removeItem('guestInfo');
     router.push('/');
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (talkingTimerRef.current) {
+        clearInterval(talkingTimerRef.current);
+      }
+    };
+  }, []);
 
   const operatorCount = participants.filter((p) => {
     try {
@@ -378,6 +420,14 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
               </div>
             )}
 
+            {/* Message sent confirmation */}
+            {messageSent && (
+              <div className="mt-4 flex items-center justify-center space-x-2 text-green-400">
+                <Send className="w-4 h-4" />
+                <span className="text-sm">Message sent to guide!</span>
+              </div>
+            )}
+
             {operatorCount === 0 && (
               <p className="text-yellow-500 mt-4 text-sm">
                 Guide not connected yet
@@ -388,6 +438,29 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
 
         {/* Controls */}
         <div className="bg-gray-800 p-4 pb-8">
+          {/* Talk to Guide Section */}
+          {isTalking && (
+            <div className="mb-4 p-4 bg-red-900/50 rounded-xl border border-red-500">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center space-x-2">
+                  <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
+                  <span className="text-red-400 font-medium">Recording...</span>
+                </div>
+                <span className="text-white font-mono">{talkingSeconds}s</span>
+              </div>
+              <p className="text-sm text-gray-300 mb-3">
+                Speak now - your message will be sent to the guide
+              </p>
+              <button
+                onClick={stopTalking}
+                className="w-full py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg flex items-center justify-center space-x-2 transition-colors"
+              >
+                <Send className="w-5 h-5" />
+                <span className="font-medium">Stop & Send to Guide</span>
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center justify-around max-w-md mx-auto">
             {/* Mute/Unmute Audio */}
             <button
@@ -403,21 +476,29 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
               )}
             </button>
 
-            {/* Ask Question */}
-            <button
-              onClick={handleAskQuestion}
-              className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors ${
-                isAskingQuestion
-                  ? 'bg-red-600 animate-pulse'
-                  : 'bg-gray-700 hover:bg-gray-600'
-              }`}
-            >
-              {isAskingQuestion ? (
-                <MicOff className="w-7 h-7" />
-              ) : (
-                <Mic className="w-7 h-7" />
-              )}
-            </button>
+            {/* Talk to Guide Button */}
+            {!isTalking ? (
+              <button
+                onClick={startTalking}
+                disabled={operatorCount === 0}
+                className={`w-20 h-20 rounded-full flex flex-col items-center justify-center transition-colors ${
+                  operatorCount === 0
+                    ? 'bg-gray-700 opacity-50'
+                    : 'bg-green-600 hover:bg-green-700'
+                }`}
+              >
+                <Mic className="w-8 h-8 mb-1" />
+                <span className="text-xs">Ask Guide</span>
+              </button>
+            ) : (
+              <button
+                onClick={stopTalking}
+                className="w-20 h-20 rounded-full bg-red-600 hover:bg-red-700 flex flex-col items-center justify-center animate-pulse"
+              >
+                <MicOff className="w-8 h-8 mb-1" />
+                <span className="text-xs">Stop</span>
+              </button>
+            )}
 
             {/* Participants */}
             <button
@@ -439,9 +520,9 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
             </button>
           </div>
 
-          {isAskingQuestion && (
-            <p className="text-center text-sm text-red-400 mt-3">
-              Speaking to guide - tap microphone to stop
+          {!isTalking && operatorCount > 0 && (
+            <p className="text-center text-sm text-gray-500 mt-3">
+              Tap "Ask Guide" to speak to your guide
             </p>
           )}
         </div>
