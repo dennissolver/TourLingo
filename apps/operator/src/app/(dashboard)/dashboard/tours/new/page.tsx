@@ -6,10 +6,18 @@ import { ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { createBrowserClient } from '@supabase/ssr';
 
+function getSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
 export default function NewTourPage() {
   const router = useRouter();
   const [isCreating, setIsCreating] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [formData, setFormData] = useState({
     name: '',
     maxGuests: 16,
@@ -17,14 +25,12 @@ export default function NewTourPage() {
 
   // Get the authenticated user on mount
   useEffect(() => {
-    const supabase = createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
+    const supabase = getSupabase();
 
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (user) {
         setUserId(user.id);
+        setIsLoading(false);
       } else {
         // Not logged in, redirect to login
         router.push('/login');
@@ -45,7 +51,7 @@ export default function NewTourPage() {
         body: JSON.stringify({
           name: formData.name,
           maxGuests: formData.maxGuests,
-          operatorId: userId,  // Now using the real user ID
+          operatorId: userId,
         }),
       });
 
@@ -65,6 +71,15 @@ export default function NewTourPage() {
     { name: 'Maggie Highlights', duration: '3 hours' },
     { name: 'Cruise Ship Special', duration: '4 hours' },
   ];
+
+  // Show loading state while checking auth
+  if (isLoading) {
+    return (
+      <div className="max-w-2xl mx-auto flex items-center justify-center min-h-[400px]">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-2xl mx-auto">
