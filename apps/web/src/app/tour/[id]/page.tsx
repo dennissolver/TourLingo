@@ -5,143 +5,102 @@ import { useParams, useRouter } from 'next/navigation';
 import {
   LiveKitRoom,
   useRoomContext,
-  useLocalParticipant,
+  useTracks,
   useParticipants,
+  AudioTrack,
 } from '@livekit/components-react';
-import { DataPacket_Kind, RoomEvent } from 'livekit-client';
-import { QRCodeSVG } from 'qrcode.react';
+import { Track, RoomEvent } from 'livekit-client';
 import {
   Mic,
   MicOff,
+  Volume2,
+  VolumeX,
   Users,
-  Copy,
-  Check,
-  Square,
-  Globe,
-  ChevronRight,
+  LogOut,
   X,
-  Loader2,
+  Globe,
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
-import { createBrowserClient } from '@supabase/ssr';
 
-function getSupabase() {
-  return createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
+interface TranslatedAudioMessage {
+  type: 'translated_audio';
+  language: string;
+  text: string;
+  audioUrl: string;
+  timestamp: number;
 }
 
-export default function LiveTourPage() {
+export default function TourRoomPage() {
   const params = useParams();
   const router = useRouter();
   const tourId = params.id as string;
 
   const [token, setToken] = useState<string | null>(null);
-  const [tour, setTour] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [guestInfo, setGuestInfo] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    async function loadTour() {
-      try {
-        const supabase = getSupabase();
-
-        const { data: tourData, error: tourError } = await supabase
-          .from('tours')
-          .select('*')
-          .eq('id', tourId)
-          .single();
-
-        if (tourError) {
-          console.error('Error fetching tour:', tourError);
-          setError('Tour not found');
-          setLoading(false);
-          return;
-        }
-
-        setTour({
-          id: tourData.id,
-          name: tourData.name,
-          accessCode: tourData.access_code,
-          status: tourData.status,
-          maxGuests: tourData.max_guests,
-        });
-
-        if (tourData.status === 'created') {
-          await supabase
-            .from('tours')
-            .update({
-              status: 'live',
-              started_at: new Date().toISOString()
-            })
-            .eq('id', tourId);
-        }
-
-        const res = await fetch('/api/livekit/token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tourId,
-            participantName: 'Guide',
-            language: 'en',
-            isOperator: true,
-          }),
-        });
-
-        if (res.ok) {
-          const { token } = await res.json();
-          setToken(token);
-        }
-      } catch (err) {
-        console.error('Error loading tour:', err);
-        setError('Failed to load tour');
-      } finally {
-        setLoading(false);
-      }
+    const stored = sessionStorage.getItem('guestInfo');
+    if (!stored) {
+      router.push('/');
+      return;
     }
 
-    loadTour();
-  }, [tourId]);
+    const info = JSON.parse(stored);
+    if (info.tourId !== tourId) {
+      router.push('/');
+      return;
+    }
 
-  if (loading) {
-    return (
-      <div className="min-h-[60vh] flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-8 h-8 border-4 border-primary-600 border-t-transparent rounded-full animate-spin mx-auto" />
-          <p className="mt-4 text-gray-600">Loading tour...</p>
-        </div>
-      </div>
-    );
-  }
+    setGuestInfo(info);
+    fetchToken(info);
+  }, [tourId, router]);
 
-  if (error || !tour) {
+  const fetchToken = async (info: any) => {
+    try {
+      const res = await fetch('/api/livekit/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tourId: info.tourId,
+          participantName: info.displayName,
+          language: info.language,
+          isOperator: false,
+        }),
+      });
+
+      if (!res.ok) throw new Error('Failed to get token');
+
+      const { token } = await res.json();
+      setToken(token);
+    } catch (err) {
+      setError('Failed to connect to tour');
+    }
+  };
+
+  if (error) {
     return (
-      <div className="min-h-[60vh] flex items-center justify-center">
-        <div className="text-center">
-          <p className="text-gray-600">{error || 'Failed to load tour'}</p>
+      <div className="min-h-screen flex items-center justify-center p-6 bg-gray-900">
+        <div className="bg-gray-800 rounded-xl p-6 text-center max-w-md">
+          <h2 className="text-xl font-semibold text-white mb-2">Connection Error</h2>
+          <p className="text-gray-400 mb-6">{error}</p>
           <button
-            onClick={() => router.push('/dashboard/tours')}
-            className="btn btn-primary mt-4"
+            onClick={() => router.push('/')}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
           >
-            Back to Tours
+            Go Back
           </button>
         </div>
       </div>
     );
   }
 
-  if (!token) {
+  if (!token || !guestInfo) {
     return (
-      <div className="min-h-[60vh] flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center bg-gray-900">
         <div className="text-center">
-          <p className="text-gray-600">Failed to connect to live session</p>
-          <button
-            onClick={() => router.push('/dashboard/tours')}
-            className="btn btn-primary mt-4"
-          >
-            Back to Tours
-          </button>
+          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto" />
+          <p className="mt-4 text-gray-400">Connecting to tour...</p>
         </div>
       </div>
     );
@@ -154,466 +113,337 @@ export default function LiveTourPage() {
       connect={true}
       audio={true}
       video={false}
+      onDisconnected={() => router.push('/')}
     >
-      <LiveTourContent tour={tour} />
+      <TourRoomContent guestInfo={guestInfo} />
     </LiveKitRoom>
   );
 }
 
-function LiveTourContent({ tour }: { tour: any }) {
+function TourRoomContent({ guestInfo }: { guestInfo: any }) {
   const router = useRouter();
   const room = useRoomContext();
-  const { localParticipant } = useLocalParticipant();
   const participants = useParticipants();
+  const audioTracks = useTracks([Track.Source.Microphone]);
 
-  const [isBroadcasting, setIsBroadcasting] = useState(false);
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [showEndConfirm, setShowEndConfirm] = useState(false);
-  const [selectedGuest, setSelectedGuest] = useState<string | null>(null);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isAskingQuestion, setIsAskingQuestion] = useState(false);
+  const [showParticipants, setShowParticipants] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [isReceivingTranslation, setIsReceivingTranslation] = useState(false);
   const [lastTranscript, setLastTranscript] = useState('');
-  const [translationError, setTranslationError] = useState<string | null>(null);
+  const [audioQueue, setAudioQueue] = useState<string[]>([]);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
 
-  // Audio recording refs
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const myLanguage = guestInfo.language;
 
-  const joinUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://tour-lingo.vercel.app'}/join/${tour.accessCode}`;
+  const language = SUPPORTED_LANGUAGES.find((l) => l.code === myLanguage);
 
-  const guests = participants.filter((p) => {
-    try {
-      const meta = JSON.parse(p.metadata || '{}');
-      return !meta.isOperator;
-    } catch {
-      return true;
-    }
-  });
-
-  const guestsByLanguage = guests.reduce((acc, guest) => {
-    try {
-      const meta = JSON.parse(guest.metadata || '{}');
-      const lang = meta.language || 'en';
-      if (!acc[lang]) acc[lang] = [];
-      acc[lang].push(guest);
-    } catch {
-      if (!acc['en']) acc['en'] = [];
-      acc['en'].push(guest);
-    }
-    return acc;
-  }, {} as Record<string, any[]>);
-
-  // Get unique languages from connected guests
-  const activeLanguages = Object.keys(guestsByLanguage);
-
-  // Process and send translated audio to guests
-  const processAndSendTranslation = useCallback(async (audioBlob: Blob) => {
-    if (audioBlob.size < 1000) return; // Skip tiny chunks
-
-    setIsTranslating(true);
-    setTranslationError(null);
-
-    try {
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'audio.webm');
-      formData.append('sourceLanguage', 'en');
-      formData.append('targetLanguages', activeLanguages.join(','));
-      formData.append('generateAudio', 'true');
-
-      const response = await fetch('/api/translate/audio', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Translation failed');
-      }
-
-      const result = await response.json();
-
-      if (result.originalText) {
-        setLastTranscript(result.originalText);
-      }
-
-      // Send translated audio to guests via LiveKit data channel
-      // Each guest receives only their language's audio
-      for (const [language, translation] of Object.entries(result.translations)) {
-        if ((translation as any).audioUrl) {
-          const message = JSON.stringify({
-            type: 'translated_audio',
-            language,
-            text: (translation as any).text,
-            audioUrl: (translation as any).audioUrl,
-            timestamp: Date.now(),
-          });
-
-          // Send to all participants (guests will filter by their language)
-          const encoder = new TextEncoder();
-          const data = encoder.encode(message);
-
-          await room.localParticipant.publishData(data, {
-            reliable: true,
-          });
-        }
-      }
-
-      console.log(`Translation sent: ${result.originalText?.substring(0, 30)}... (${result.processingTimeMs}ms)`);
-    } catch (error) {
-      console.error('Translation error:', error);
-      setTranslationError(error instanceof Error ? error.message : 'Translation failed');
-    } finally {
-      setIsTranslating(false);
-    }
-  }, [activeLanguages, room]);
-
-  // Start recording and translation
-  const startBroadcasting = useCallback(async () => {
-    try {
-      // Enable microphone in LiveKit (for raw audio fallback)
-      await localParticipant.setMicrophoneEnabled(true);
-
-      // Get microphone stream for recording
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus',
-      });
-
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        if (audioChunksRef.current.length > 0) {
-          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          processAndSendTranslation(audioBlob);
-          audioChunksRef.current = [];
-        }
-      };
-
-      // Start recording
-      mediaRecorder.start();
-
-      // Process audio every 3 seconds for translation
-      recordingIntervalRef.current = setInterval(() => {
-        if (mediaRecorder.state === 'recording') {
-          mediaRecorder.stop();
-          mediaRecorder.start();
-        }
-      }, 3000);
-
-      setIsBroadcasting(true);
-    } catch (error) {
-      console.error('Failed to start broadcasting:', error);
-      setTranslationError('Failed to access microphone');
-    }
-  }, [localParticipant, processAndSendTranslation]);
-
-  // Stop recording and translation
-  const stopBroadcasting = useCallback(async () => {
-    // Stop interval
-    if (recordingIntervalRef.current) {
-      clearInterval(recordingIntervalRef.current);
-      recordingIntervalRef.current = null;
-    }
-
-    // Stop media recorder
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-
-    // Disable microphone
-    await localParticipant.setMicrophoneEnabled(false);
-
-    setIsBroadcasting(false);
-  }, [localParticipant]);
-
-  const handleBroadcastToggle = async () => {
-    if (isBroadcasting) {
-      await stopBroadcasting();
-    } else {
-      await startBroadcasting();
-    }
-  };
-
-  const handleCopyCode = () => {
-    navigator.clipboard.writeText(tour.accessCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleEndTour = async () => {
-    try {
-      await stopBroadcasting();
-
-      const supabase = getSupabase();
-      await supabase
-        .from('tours')
-        .update({
-          status: 'ended',
-          ended_at: new Date().toISOString()
-        })
-        .eq('id', tour.id);
-
-      room.disconnect();
-      router.push('/dashboard/tours');
-    } catch (err) {
-      console.error('Error ending tour:', err);
-      room.disconnect();
-      router.push('/dashboard/tours');
-    }
-  };
-
-  // Cleanup on unmount
+  // Handle incoming translated audio via data channel
   useEffect(() => {
-    return () => {
-      if (recordingIntervalRef.current) {
-        clearInterval(recordingIntervalRef.current);
-      }
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
+    const handleDataReceived = (payload: Uint8Array, participant: any) => {
+      try {
+        const decoder = new TextDecoder();
+        const message = JSON.parse(decoder.decode(payload)) as TranslatedAudioMessage;
+
+        if (message.type === 'translated_audio' && message.language === myLanguage) {
+          console.log(`Received translation: "${message.text.substring(0, 30)}..."`);
+          setLastTranscript(message.text);
+          setIsReceivingTranslation(true);
+
+          // Add to audio queue
+          setAudioQueue(prev => [...prev, message.audioUrl]);
+        }
+      } catch (error) {
+        // Not a JSON message, ignore
       }
     };
-  }, []);
+
+    room.on(RoomEvent.DataReceived, handleDataReceived);
+
+    return () => {
+      room.off(RoomEvent.DataReceived, handleDataReceived);
+    };
+  }, [room, myLanguage]);
+
+  // Play audio from queue
+  useEffect(() => {
+    if (audioQueue.length > 0 && !isPlayingAudio && !isMuted) {
+      const nextAudio = audioQueue[0];
+      setAudioQueue(prev => prev.slice(1));
+      setIsPlayingAudio(true);
+
+      const audio = new Audio(nextAudio);
+      audioPlayerRef.current = audio;
+
+      audio.onended = () => {
+        setIsPlayingAudio(false);
+        setIsReceivingTranslation(audioQueue.length > 0);
+      };
+
+      audio.onerror = () => {
+        console.error('Audio playback error');
+        setIsPlayingAudio(false);
+        setIsReceivingTranslation(audioQueue.length > 0);
+      };
+
+      audio.play().catch((error) => {
+        console.error('Failed to play audio:', error);
+        setIsPlayingAudio(false);
+      });
+    }
+  }, [audioQueue, isPlayingAudio, isMuted]);
+
+  // Handle mute - stop current audio
+  const handleToggleMute = useCallback(() => {
+    if (!isMuted && audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current = null;
+      setIsPlayingAudio(false);
+    }
+    setIsMuted(!isMuted);
+  }, [isMuted]);
+
+  const handleAskQuestion = async () => {
+    if (isAskingQuestion) {
+      await room.localParticipant.setMicrophoneEnabled(false);
+      setIsAskingQuestion(false);
+    } else {
+      await room.localParticipant.setMicrophoneEnabled(true);
+      setIsAskingQuestion(true);
+    }
+  };
+
+  const handleLeave = () => {
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.pause();
+    }
+    room.disconnect();
+    sessionStorage.removeItem('guestInfo');
+    router.push('/');
+  };
+
+  const operatorCount = participants.filter((p) => {
+    try {
+      return JSON.parse(p.metadata || '{}').isOperator;
+    } catch {
+      return false;
+    }
+  }).length;
+
+  const guestCount = participants.length - operatorCount;
 
   return (
-    <div className="min-h-[calc(100vh-8rem)] flex flex-col lg:flex-row gap-6">
-      {/* Main Control Panel */}
-      <div className="flex-1 space-y-6">
-        {/* Broadcast Control */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">{tour.name}</h2>
-              <p className="text-gray-500">
-                {guests.length} guest{guests.length !== 1 ? 's' : ''} connected
-              </p>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span
-                className={`w-3 h-3 rounded-full ${
-                  isBroadcasting ? 'bg-red-500 animate-pulse' : 'bg-gray-300'
-                }`}
-              />
-              <span className="text-sm text-gray-600">
-                {isBroadcasting ? 'Broadcasting' : 'Paused'}
-              </span>
-            </div>
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
+      {/* Fallback: Play raw operator audio for English guests */}
+      <div className="hidden">
+        {myLanguage === 'en' && audioTracks.map((trackRef) => (
+          <AudioTrack
+            key={trackRef.publication?.trackSid}
+            trackRef={trackRef}
+            volume={isMuted ? 0 : 1}
+          />
+        ))}
+      </div>
+
+      {/* Header */}
+      <header className="bg-gray-800 px-4 py-3 flex items-center justify-between">
+        <div>
+          <div className="flex items-center space-x-2">
+            <span className={`w-2 h-2 rounded-full ${
+              isPlayingAudio 
+                ? 'bg-green-500 animate-pulse' 
+                : operatorCount > 0 
+                  ? 'bg-yellow-500' 
+                  : 'bg-red-500'
+            }`} />
+            <span className="text-sm text-gray-300">
+              {isPlayingAudio
+                ? 'Playing Translation'
+                : operatorCount > 0
+                  ? 'Connected'
+                  : 'Guide Offline'}
+            </span>
           </div>
+          <h1 className="font-semibold">Tour</h1>
+        </div>
+        <div className="flex items-center space-x-2">
+          <span className="text-2xl">{language?.flag}</span>
+          <span className="text-sm text-gray-300">{language?.name}</span>
+        </div>
+      </header>
 
-          {/* Big Broadcast Button */}
-          <button
-            onClick={handleBroadcastToggle}
-            disabled={isTranslating && !isBroadcasting}
-            className={`w-full py-8 rounded-xl flex flex-col items-center justify-center transition-colors ${
-              isBroadcasting
-                ? 'bg-red-600 hover:bg-red-700 text-white'
-                : 'bg-primary-600 hover:bg-primary-700 text-white'
-            } disabled:opacity-50`}
-          >
-            {isBroadcasting ? (
-              <>
-                <MicOff className="w-12 h-12 mb-2" />
-                <span className="text-lg font-medium">Tap to Pause</span>
-              </>
-            ) : (
-              <>
-                <Mic className="w-12 h-12 mb-2" />
-                <span className="text-lg font-medium">Tap to Broadcast</span>
-              </>
-            )}
-          </button>
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col">
+        {/* Audio Visualization */}
+        <div className="flex-1 flex items-center justify-center p-6">
+          <div className="text-center">
+            <div className={`w-32 h-32 rounded-full flex items-center justify-center mx-auto mb-4 transition-all duration-300 ${
+              isPlayingAudio && !isMuted 
+                ? 'bg-blue-600 scale-110' 
+                : 'bg-gray-800'
+            }`}>
+              {isMuted ? (
+                <VolumeX className="w-16 h-16 text-gray-600" />
+              ) : isPlayingAudio ? (
+                <Volume2 className="w-16 h-16 text-white animate-pulse" />
+              ) : (
+                <Volume2 className="w-16 h-16 text-gray-600" />
+              )}
+            </div>
 
-          {/* Translation Status */}
-          <div className="mt-4 space-y-2">
-            {isTranslating && (
-              <div className="flex items-center justify-center text-sm text-primary-600">
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Translating...
-              </div>
-            )}
-
-            {translationError && (
-              <div className="text-sm text-red-600 text-center">
-                {translationError}
-              </div>
-            )}
-
-            {lastTranscript && (
-              <div className="p-3 bg-gray-50 rounded-lg">
-                <p className="text-xs text-gray-500 mb-1">Last transcript:</p>
-                <p className="text-sm text-gray-700">{lastTranscript}</p>
-              </div>
-            )}
-
-            <p className="text-center text-sm text-gray-500">
-              {isBroadcasting
-                ? `Translating to ${activeLanguages.length} language${activeLanguages.length !== 1 ? 's' : ''}`
-                : 'Press to start speaking to your guests'}
+            <p className="text-gray-400">
+              {isMuted
+                ? 'Audio muted - tap speaker to unmute'
+                : isPlayingAudio
+                  ? 'Listening to translated guide...'
+                  : 'Waiting for guide to speak...'}
             </p>
+
+            {/* Last transcript */}
+            {lastTranscript && !isMuted && (
+              <div className="mt-4 max-w-sm mx-auto">
+                <div className="p-3 bg-gray-800 rounded-lg">
+                  <div className="flex items-center justify-center space-x-2 mb-2">
+                    <Globe className="w-4 h-4 text-blue-400" />
+                    <span className="text-xs text-blue-400">Translated</span>
+                  </div>
+                  <p className="text-sm text-gray-300">{lastTranscript}</p>
+                </div>
+              </div>
+            )}
+
+            {operatorCount === 0 && (
+              <p className="text-yellow-500 mt-4 text-sm">
+                Guide not connected yet
+              </p>
+            )}
           </div>
         </div>
 
-        {/* Active Languages */}
-        {activeLanguages.length > 0 && (
-          <div className="card">
-            <div className="flex items-center space-x-2 mb-3">
-              <Globe className="w-4 h-4 text-gray-400" />
-              <h3 className="text-sm font-medium text-gray-700">Active Languages</h3>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {activeLanguages.map((lang) => {
-                const language = SUPPORTED_LANGUAGES.find((l) => l.code === lang);
-                return (
-                  <span
-                    key={lang}
-                    className="inline-flex items-center px-3 py-1 bg-primary-50 text-primary-700 rounded-full text-sm"
-                  >
-                    <span className="mr-1">{language?.flag || '🌐'}</span>
-                    {language?.name || lang}
-                    <span className="ml-1 text-xs">({guestsByLanguage[lang]?.length || 0})</span>
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-        )}
+        {/* Controls */}
+        <div className="bg-gray-800 p-4 pb-8">
+          <div className="flex items-center justify-around max-w-md mx-auto">
+            {/* Mute/Unmute Audio */}
+            <button
+              onClick={handleToggleMute}
+              className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${
+                isMuted ? 'bg-red-600' : 'bg-blue-600'
+              }`}
+            >
+              {isMuted ? (
+                <VolumeX className="w-6 h-6" />
+              ) : (
+                <Volume2 className="w-6 h-6" />
+              )}
+            </button>
 
-        {/* Quick Actions */}
-        <div className="grid grid-cols-2 gap-4">
-          <button
-            onClick={() => setShowEndConfirm(true)}
-            className="btn btn-secondary py-4 flex-col"
-          >
-            <Square className="w-5 h-5 mb-1" />
-            <span>End Tour</span>
-          </button>
-          <button className="btn btn-secondary py-4 flex-col opacity-50" disabled>
-            <Globe className="w-5 h-5 mb-1" />
-            <span>Announcements</span>
-          </button>
+            {/* Ask Question */}
+            <button
+              onClick={handleAskQuestion}
+              className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors ${
+                isAskingQuestion
+                  ? 'bg-red-600 animate-pulse'
+                  : 'bg-gray-700 hover:bg-gray-600'
+              }`}
+            >
+              {isAskingQuestion ? (
+                <MicOff className="w-7 h-7" />
+              ) : (
+                <Mic className="w-7 h-7" />
+              )}
+            </button>
+
+            {/* Participants */}
+            <button
+              onClick={() => setShowParticipants(true)}
+              className="w-14 h-14 rounded-full bg-gray-700 flex items-center justify-center relative hover:bg-gray-600 transition-colors"
+            >
+              <Users className="w-6 h-6" />
+              <span className="absolute -top-1 -right-1 w-5 h-5 bg-blue-600 rounded-full text-xs flex items-center justify-center">
+                {guestCount}
+              </span>
+            </button>
+
+            {/* Leave */}
+            <button
+              onClick={() => setShowLeaveConfirm(true)}
+              className="w-14 h-14 rounded-full bg-gray-700 flex items-center justify-center hover:bg-gray-600 transition-colors"
+            >
+              <LogOut className="w-6 h-6" />
+            </button>
+          </div>
+
+          {isAskingQuestion && (
+            <p className="text-center text-sm text-red-400 mt-3">
+              Speaking to guide - tap microphone to stop
+            </p>
+          )}
         </div>
       </div>
 
-      {/* Sidebar - QR & Guests */}
-      <div className="lg:w-80 space-y-6">
-        {/* QR Code */}
-        <div className="card">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">Guest Join</h3>
-          <div className="bg-white p-4 rounded-lg border border-gray-200 flex justify-center">
-            <QRCodeSVG value={joinUrl} size={160} />
-          </div>
-          <div className="mt-4">
-            <p className="text-xs text-gray-500 mb-2">Or share the code:</p>
-            <button
-              onClick={handleCopyCode}
-              className="w-full flex items-center justify-between px-4 py-2 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
-            >
-              <span className="font-mono text-lg font-semibold tracking-widest">
-                {tour.accessCode}
-              </span>
-              {copied ? (
-                <Check className="w-5 h-5 text-green-600" />
-              ) : (
-                <Copy className="w-5 h-5 text-gray-500" />
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* Connected Guests */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-gray-700">
-              Guests ({guests.length})
-            </h3>
-            <Users className="w-4 h-4 text-gray-400" />
-          </div>
-
-          {guests.length === 0 ? (
-            <p className="text-sm text-gray-500 text-center py-4">
-              Waiting for guests to join...
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {Object.entries(guestsByLanguage).map(([lang, langGuests]) => {
-                const language = SUPPORTED_LANGUAGES.find((l) => l.code === lang);
+      {/* Participants Modal */}
+      {showParticipants && (
+        <div className="fixed inset-0 bg-black/50 flex items-end z-50">
+          <div className="bg-gray-800 w-full rounded-t-2xl p-4 max-h-[60vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Participants ({participants.length})</h2>
+              <button onClick={() => setShowParticipants(false)}>
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            <div className="space-y-2">
+              {participants.map((p) => {
+                let meta = { language: 'en', isOperator: false };
+                try {
+                  meta = JSON.parse(p.metadata || '{}');
+                } catch {}
+                const lang = SUPPORTED_LANGUAGES.find((l) => l.code === meta.language);
                 return (
-                  <div key={lang}>
-                    <div className="flex items-center space-x-2 mb-2">
-                      <span className="text-lg">{language?.flag || '🌐'}</span>
-                      <span className="text-xs text-gray-500">
-                        {language?.name || lang} ({langGuests.length})
-                      </span>
-                    </div>
-                    <div className="space-y-1 pl-7">
-                      {langGuests.map((guest: any) => (
-                        <button
-                          key={guest.identity}
-                          onClick={() => setSelectedGuest(guest.identity)}
-                          className="w-full flex items-center justify-between py-1.5 px-2 rounded hover:bg-gray-100 text-sm"
-                        >
-                          <span className="truncate">{guest.name}</span>
-                          <ChevronRight className="w-4 h-4 text-gray-400" />
-                        </button>
-                      ))}
+                  <div
+                    key={p.identity}
+                    className="flex items-center justify-between py-2 px-3 bg-gray-700 rounded-lg"
+                  >
+                    <div className="flex items-center space-x-3">
+                      <span className="text-xl">{lang?.flag || '🌐'}</span>
+                      <span>{p.name || p.identity}</span>
+                      {meta.isOperator && (
+                        <span className="text-xs bg-blue-600 px-2 py-0.5 rounded">
+                          Guide
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
               })}
             </div>
-          )}
-        </div>
-      </div>
-
-      {/* End Tour Confirmation Modal */}
-      {showEndConfirm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 max-w-sm w-full">
-            <h2 className="text-lg font-semibold text-gray-900 mb-2">End Tour?</h2>
-            <p className="text-gray-600 mb-6">
-              This will disconnect all guests and archive the tour.
-            </p>
-            <div className="flex space-x-3">
-              <button
-                onClick={() => setShowEndConfirm(false)}
-                className="btn btn-secondary flex-1"
-              >
-                Cancel
-              </button>
-              <button onClick={handleEndTour} className="btn btn-danger flex-1">
-                End Tour
-              </button>
-            </div>
           </div>
         </div>
       )}
 
-      {/* Guest Info Modal */}
-      {selectedGuest && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl p-6 max-w-sm w-full">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">Guest Info</h2>
-              <button onClick={() => setSelectedGuest(null)}>
-                <X className="w-5 h-5 text-gray-500" />
+      {/* Leave Confirmation */}
+      {showLeaveConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-6">
+          <div className="bg-gray-800 rounded-xl p-6 max-w-sm w-full">
+            <h2 className="text-lg font-semibold mb-2">Leave Tour?</h2>
+            <p className="text-gray-400 mb-6">
+              Are you sure you want to leave this tour?
+            </p>
+            <div className="flex space-x-3">
+              <button
+                onClick={() => setShowLeaveConfirm(false)}
+                className="flex-1 px-4 py-2 bg-gray-700 text-white rounded-lg hover:bg-gray-600"
+              >
+                Stay
+              </button>
+              <button
+                onClick={handleLeave}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+              >
+                Leave
               </button>
             </div>
-            <p className="text-gray-600 mb-4">
-              Private messaging coming soon.
-            </p>
-            <button
-              onClick={() => setSelectedGuest(null)}
-              className="btn btn-primary w-full"
-            >
-              Close
-            </button>
           </div>
         </div>
       )}
