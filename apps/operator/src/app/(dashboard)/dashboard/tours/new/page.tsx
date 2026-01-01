@@ -1,20 +1,41 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
+import { createBrowserClient } from '@supabase/ssr';
 
 export default function NewTourPage() {
   const router = useRouter();
   const [isCreating, setIsCreating] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     name: '',
     maxGuests: 16,
   });
 
+  // Get the authenticated user on mount
+  useEffect(() => {
+    const supabase = createBrowserClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
+        setUserId(user.id);
+      } else {
+        // Not logged in, redirect to login
+        router.push('/login');
+      }
+    });
+  }, [router]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!userId) return;
+
     setIsCreating(true);
 
     try {
@@ -24,7 +45,7 @@ export default function NewTourPage() {
         body: JSON.stringify({
           name: formData.name,
           maxGuests: formData.maxGuests,
-          operatorId: 'current-user-id', // TODO: Get from auth
+          operatorId: userId,  // Now using the real user ID
         }),
       });
 
