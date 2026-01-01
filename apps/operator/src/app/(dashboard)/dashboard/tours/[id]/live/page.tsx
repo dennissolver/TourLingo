@@ -21,6 +21,14 @@ import {
   X,
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
+import { createBrowserClient } from '@supabase/ssr';
+
+function getSupabase() {
+  return createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
 
 export default function LiveTourPage() {
   const params = useParams();
@@ -30,17 +38,45 @@ export default function LiveTourPage() {
   const [token, setToken] = useState<string | null>(null);
   const [tour, setTour] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function loadTour() {
       try {
-        // TODO: Fetch tour details from Supabase
+        const supabase = getSupabase();
+
+        // Fetch tour details from Supabase
+        const { data: tourData, error: tourError } = await supabase
+          .from('tours')
+          .select('*')
+          .eq('id', tourId)
+          .single();
+
+        if (tourError) {
+          console.error('Error fetching tour:', tourError);
+          setError('Tour not found');
+          setLoading(false);
+          return;
+        }
+
         setTour({
-          id: tourId,
-          name: 'Maggie Comprehensive',
-          accessCode: 'ABC123',
-          status: 'live',
+          id: tourData.id,
+          name: tourData.name,
+          accessCode: tourData.access_code,
+          status: tourData.status,
+          maxGuests: tourData.max_guests,
         });
+
+        // Update tour status to 'live' if it's still 'created'
+        if (tourData.status === 'created') {
+          await supabase
+            .from('tours')
+            .update({
+              status: 'live',
+              started_at: new Date().toISOString()
+            })
+            .eq('id', tourId);
+        }
 
         // Get LiveKit token
         const res = await fetch('/api/livekit/token', {
@@ -58,6 +94,9 @@ export default function LiveTourPage() {
           const { token } = await res.json();
           setToken(token);
         }
+      } catch (err) {
+        console.error('Error loading tour:', err);
+        setError('Failed to load tour');
       } finally {
         setLoading(false);
       }
@@ -77,11 +116,27 @@ export default function LiveTourPage() {
     );
   }
 
-  if (!token || !tour) {
+  if (error || !tour) {
     return (
       <div className="min-h-[60vh] flex items-center justify-center">
         <div className="text-center">
-          <p className="text-gray-600">Failed to load tour</p>
+          <p className="text-gray-600">{error || 'Failed to load tour'}</p>
+          <button
+            onClick={() => router.push('/dashboard/tours')}
+            className="btn btn-primary mt-4"
+          >
+            Back to Tours
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!token) {
+    return (
+      <div className="min-h-[60vh] flex items-center justify-center">
+        <div className="text-center">
+          <p className="text-gray-600">Failed to connect to live session</p>
           <button
             onClick={() => router.push('/dashboard/tours')}
             className="btn btn-primary mt-4"
@@ -149,9 +204,25 @@ function LiveTourContent({ tour }: { tour: any }) {
   };
 
   const handleEndTour = async () => {
-    // TODO: Update tour status in Supabase
-    room.disconnect();
-    router.push('/dashboard/tours');
+    try {
+      const supabase = getSupabase();
+
+      // Update tour status in Supabase
+      await supabase
+        .from('tours')
+        .update({
+          status: 'ended',
+          ended_at: new Date().toISOString()
+        })
+        .eq('id', tour.id);
+
+      room.disconnect();
+      router.push('/dashboard/tours');
+    } catch (err) {
+      console.error('Error ending tour:', err);
+      room.disconnect();
+      router.push('/dashboard/tours');
+    }
   };
 
   return (
