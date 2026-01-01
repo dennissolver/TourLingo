@@ -8,7 +8,6 @@ import {
   useLocalParticipant,
   useParticipants,
 } from '@livekit/components-react';
-import { DataPacket_Kind, RoomEvent } from 'livekit-client';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Mic,
@@ -31,6 +30,9 @@ function getSupabase() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   );
 }
+
+// Max chunk size for LiveKit data channel (leave room for JSON wrapper)
+const MAX_CHUNK_SIZE = 50000; // ~50KB to be safe under 64KB limit
 
 export default function LiveTourPage() {
   const params = useParams();
@@ -206,9 +208,43 @@ function LiveTourContent({ tour }: { tour: any }) {
   // Get unique languages from connected guests
   const activeLanguages = Object.keys(guestsByLanguage);
 
+  // Send data in chunks to avoid LiveKit's 64KB limit
+  const sendChunkedData = useCallback(async (data: object) => {
+    const jsonStr = JSON.stringify(data);
+    const encoder = new TextEncoder();
+
+    // If small enough, send directly
+    if (jsonStr.length < MAX_CHUNK_SIZE) {
+      const encoded = encoder.encode(jsonStr);
+      await room.localParticipant.publishData(encoded, { reliable: true });
+      return;
+    }
+
+    // Otherwise, chunk it
+    const messageId = Date.now().toString();
+    const totalChunks = Math.ceil(jsonStr.length / MAX_CHUNK_SIZE);
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunk = jsonStr.slice(i * MAX_CHUNK_SIZE, (i + 1) * MAX_CHUNK_SIZE);
+      const chunkMessage = {
+        type: 'audio_chunk',
+        messageId,
+        chunkIndex: i,
+        totalChunks,
+        data: chunk,
+      };
+      const encoded = encoder.encode(JSON.stringify(chunkMessage));
+      await room.localParticipant.publishData(encoded, { reliable: true });
+
+      // Small delay between chunks to avoid overwhelming
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }, [room]);
+
   // Process and send translated audio to guests
   const processAndSendTranslation = useCallback(async (audioBlob: Blob) => {
     if (audioBlob.size < 1000) return; // Skip tiny chunks
+    if (activeLanguages.length === 0) return; // No guests
 
     setIsTranslating(true);
     setTranslationError(null);
@@ -237,24 +273,22 @@ function LiveTourContent({ tour }: { tour: any }) {
       }
 
       // Send translated audio to guests via LiveKit data channel
-      // Each guest receives only their language's audio
       for (const [language, translation] of Object.entries(result.translations)) {
-        if ((translation as any).audioUrl) {
-          const message = JSON.stringify({
+        const trans = translation as { text: string; audioUrl?: string };
+        if (trans.audioUrl) {
+          const message = {
             type: 'translated_audio',
             language,
-            text: (translation as any).text,
-            audioUrl: (translation as any).audioUrl,
+            text: trans.text,
+            audioUrl: trans.audioUrl,
             timestamp: Date.now(),
-          });
+          };
 
-          // Send to all participants (guests will filter by their language)
-          const encoder = new TextEncoder();
-          const data = encoder.encode(message);
-
-          await room.localParticipant.publishData(data, {
-            reliable: true,
-          });
+          try {
+            await sendChunkedData(message);
+          } catch (sendError) {
+            console.error(`Failed to send translation for ${language}:`, sendError);
+          }
         }
       }
 
@@ -265,7 +299,7 @@ function LiveTourContent({ tour }: { tour: any }) {
     } finally {
       setIsTranslating(false);
     }
-  }, [activeLanguages, room]);
+  }, [activeLanguages, sendChunkedData]);
 
   // Start recording and translation
   const startBroadcasting = useCallback(async () => {

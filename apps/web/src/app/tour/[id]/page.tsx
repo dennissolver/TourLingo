@@ -30,6 +30,14 @@ interface TranslatedAudioMessage {
   timestamp: number;
 }
 
+interface AudioChunkMessage {
+  type: 'audio_chunk';
+  messageId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  data: string;
+}
+
 export default function TourRoomPage() {
   const params = useParams();
   const router = useRouter();
@@ -136,24 +144,64 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
 
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const chunkBufferRef = useRef<Map<string, string[]>>(new Map());
   const myLanguage = guestInfo.language;
 
   const language = SUPPORTED_LANGUAGES.find((l) => l.code === myLanguage);
 
-  // Handle incoming translated audio via data channel
+  // Process a complete message (either direct or reassembled from chunks)
+  const processCompleteMessage = useCallback((message: TranslatedAudioMessage) => {
+    if (message.type === 'translated_audio' && message.language === myLanguage) {
+      console.log(`Received translation: "${message.text.substring(0, 30)}..."`);
+      setLastTranscript(message.text);
+      setIsReceivingTranslation(true);
+
+      // Add to audio queue
+      setAudioQueue(prev => [...prev, message.audioUrl]);
+    }
+  }, [myLanguage]);
+
+  // Handle incoming data via data channel
   useEffect(() => {
     const handleDataReceived = (payload: Uint8Array, participant: any) => {
       try {
         const decoder = new TextDecoder();
-        const message = JSON.parse(decoder.decode(payload)) as TranslatedAudioMessage;
+        const parsed = JSON.parse(decoder.decode(payload));
 
-        if (message.type === 'translated_audio' && message.language === myLanguage) {
-          console.log(`Received translation: "${message.text.substring(0, 30)}..."`);
-          setLastTranscript(message.text);
-          setIsReceivingTranslation(true);
+        // Handle chunked message
+        if (parsed.type === 'audio_chunk') {
+          const chunk = parsed as AudioChunkMessage;
+          const { messageId, chunkIndex, totalChunks, data } = chunk;
 
-          // Add to audio queue
-          setAudioQueue(prev => [...prev, message.audioUrl]);
+          // Initialize buffer for this message if needed
+          if (!chunkBufferRef.current.has(messageId)) {
+            chunkBufferRef.current.set(messageId, new Array(totalChunks).fill(''));
+          }
+
+          // Store this chunk
+          const buffer = chunkBufferRef.current.get(messageId)!;
+          buffer[chunkIndex] = data;
+
+          // Check if we have all chunks
+          const complete = buffer.every(part => part !== '');
+          if (complete) {
+            // Reassemble the message
+            const fullJson = buffer.join('');
+            try {
+              const message = JSON.parse(fullJson) as TranslatedAudioMessage;
+              processCompleteMessage(message);
+            } catch (e) {
+              console.error('Failed to parse reassembled message:', e);
+            }
+            // Clean up buffer
+            chunkBufferRef.current.delete(messageId);
+          }
+          return;
+        }
+
+        // Handle direct (non-chunked) message
+        if (parsed.type === 'translated_audio') {
+          processCompleteMessage(parsed as TranslatedAudioMessage);
         }
       } catch (error) {
         // Not a JSON message, ignore
@@ -165,7 +213,23 @@ function TourRoomContent({ guestInfo }: { guestInfo: any }) {
     return () => {
       room.off(RoomEvent.DataReceived, handleDataReceived);
     };
-  }, [room, myLanguage]);
+  }, [room, processCompleteMessage]);
+
+  // Clean up old incomplete chunk buffers periodically
+  useEffect(() => {
+    const cleanup = setInterval(() => {
+      // Clear any buffers older than 30 seconds (based on timestamp in messageId)
+      const now = Date.now();
+      for (const [messageId] of chunkBufferRef.current) {
+        const timestamp = parseInt(messageId, 10);
+        if (!isNaN(timestamp) && now - timestamp > 30000) {
+          chunkBufferRef.current.delete(messageId);
+        }
+      }
+    }, 10000);
+
+    return () => clearInterval(cleanup);
+  }, []);
 
   // Play audio from queue
   useEffect(() => {
