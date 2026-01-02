@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { createClient } from '@supabase/supabase-js';
 import {
   Home,
   Map,
@@ -21,13 +22,51 @@ const navigation = [
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ];
 
+// Create Supabase client for auth operations
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  const handleSignOut = async () => {
+    setIsSigningOut(true);
+    try {
+      const supabase = getSupabase();
+      const { error } = await supabase.auth.signOut();
+
+      if (error) {
+        console.error('Sign out error:', error);
+      }
+
+      // Clear any local storage
+      if (typeof window !== 'undefined') {
+        localStorage.clear();
+        sessionStorage.clear();
+      }
+
+      // Redirect to login
+      router.push('/login');
+      router.refresh();
+    } catch (error) {
+      console.error('Failed to sign out:', error);
+      // Force redirect anyway
+      router.push('/login');
+    } finally {
+      setIsSigningOut(false);
+    }
+  };
 
   return (
     <div className="min-h-screen flex">
@@ -88,16 +127,20 @@ export default function DashboardLayout({
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-900 truncate">
-                  Tim Bee
+                  Operator
                 </p>
                 <p className="text-xs text-gray-500 truncate">
-                  tim@magneticislandtours.com
+                  Tour Guide
                 </p>
               </div>
             </div>
-            <button className="sidebar-link w-full mt-2 text-red-600 hover:bg-red-50 hover:text-red-700">
+            <button
+              onClick={handleSignOut}
+              disabled={isSigningOut}
+              className="sidebar-link w-full mt-2 text-red-600 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+            >
               <LogOut className="w-5 h-5" />
-              <span>Sign out</span>
+              <span>{isSigningOut ? 'Signing out...' : 'Sign out'}</span>
             </button>
           </div>
         </div>
