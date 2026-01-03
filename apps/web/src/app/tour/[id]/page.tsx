@@ -40,8 +40,9 @@ function getSupabase() {
 type TalkChannel = 'all' | 'guide' | string; // string = specific guest identity
 
 interface GuestInfo {
-  name: string;
+  displayName: string;
   language: string;
+  tourId?: string;
 }
 
 export default function GuestTourPage() {
@@ -94,7 +95,7 @@ export default function GuestTourPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             tourId,
-            participantName: info.name,
+            participantName: info.displayName,
             language: info.language,
             isOperator: false,
           }),
@@ -487,7 +488,7 @@ function GuestTourContent({ tour, guestInfo }: { tour: any; guestInfo: GuestInfo
           text: trans.text,
           audioUrl: trans.audioUrl,
           timestamp: Date.now(),
-          senderName: guestInfo.name,
+          senderName: guestInfo.displayName,
           senderLanguage: myLanguage,
           targetChannel: talkChannel, // Include channel for filtering
         };
