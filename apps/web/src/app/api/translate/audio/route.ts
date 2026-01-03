@@ -49,17 +49,17 @@ function filterNoise(text: string): { filteredText: string; isNoise: boolean; no
 
 function isLikelySpeech(text: string): boolean {
   if (!text || text.trim().length < 3) return false;
-  
+
   for (const pattern of NOISE_ONLY_PATTERNS) {
     if (pattern.test(text.trim())) return false;
   }
-  
-  const words = text.split(/\s+/).filter(w => 
-    w.length > 2 && 
+
+  const words = text.split(/\s+/).filter(w =>
+    w.length > 2 &&
     !/^(um+|uh+|ah+|er+|hmm+)$/i.test(w) &&
     !/[\[\]\(\)\*]/.test(w)
   );
-  
+
   return words.length >= 2;
 }
 

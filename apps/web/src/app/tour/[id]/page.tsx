@@ -190,11 +190,11 @@ function GuestTourContent({ tour, guestInfo }: { tour: any; guestInfo: GuestInfo
   const [talkingSeconds, setTalkingSeconds] = useState(0);
   const [lastMessage, setLastMessage] = useState<string>('');
   const [translationError, setTranslationError] = useState<string | null>(null);
-  
+
   // Channel selection
   const [talkChannel, setTalkChannel] = useState<TalkChannel>('all');
   const [showChannelPicker, setShowChannelPicker] = useState(false);
-  
+
   // Audio refs
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<string[]>([]);
@@ -411,7 +411,7 @@ function GuestTourContent({ tour, guestInfo }: { tour: any; guestInfo: GuestInfo
     try {
       // Determine target languages based on channel
       let targetLanguages: string[] = [];
-      
+
       if (talkChannel === 'all') {
         // Get all unique languages from participants
         const languages = new Set<string>();
@@ -530,7 +530,7 @@ function GuestTourContent({ tour, guestInfo }: { tour: any; guestInfo: GuestInfo
 
     if (jsonStr.length < MAX_CHUNK_SIZE) {
       const encoded = encoder.encode(jsonStr);
-      await room.localParticipant.publishData(encoded, { 
+      await room.localParticipant.publishData(encoded, {
         reliable: true,
         ...destination,
       });
@@ -551,7 +551,7 @@ function GuestTourContent({ tour, guestInfo }: { tour: any; guestInfo: GuestInfo
         data: chunk,
       };
       const encoded = encoder.encode(JSON.stringify(chunkMessage));
-      await room.localParticipant.publishData(encoded, { 
+      await room.localParticipant.publishData(encoded, {
         reliable: true,
         ...destination,
       });
@@ -720,7 +720,7 @@ function GuestTourContent({ tour, guestInfo }: { tour: any; guestInfo: GuestInfo
                 <Mic className="w-10 h-10 mb-2" />
                 <span className="text-lg">Hold to Talk</span>
                 <span className="text-sm text-primary-200 mt-1">
-                  {talkChannel === 'guide' ? 'Private to Guide' : 
+                  {talkChannel === 'guide' ? 'Private to Guide' :
                    talkChannel === 'all' ? 'To Everyone' : 'Private Message'}
                 </span>
               </>

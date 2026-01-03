@@ -190,7 +190,7 @@ function LiveTourContent({ tour }: { tour: any }) {
   const [selectedGuest, setSelectedGuest] = useState<string | null>(null);
   const [lastTranscript, setLastTranscript] = useState('');
   const [translationError, setTranslationError] = useState<string | null>(null);
-  
+
   // Guest messages state
   const [guestMessages, setGuestMessages] = useState<GuestMessage[]>([]);
   const [isPlayingGuestAudio, setIsPlayingGuestAudio] = useState(false);
