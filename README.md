@@ -1,282 +1,170 @@
-# TourLingo
+# TourLingo Fixes - Bidirectional Translation & Channel Selection
 
-Real-time multilingual communication platform for tour operators and guests.
+## Issues Fixed
 
-## Overview
+### 1. ✅ Guest → Guide/Other Guests Translation
+**Problem:** Guest audio played raw to the operator without translation.
 
-TourLingo enables tour operators to speak naturally while guests hear real-time translations in their preferred language through their own earphones.
+**Solution:** Guests now capture audio, send it through the translation pipeline, and broadcast translated audio to the guide (in English) and other guests (in their languages).
 
-### Translation Flow
+### 2. ✅ Channel Selection (Who to Talk To)
+**Problem:** Guests could only broadcast to everyone.
 
-```
-🎤 Operator speaks → ElevenLabs STT → Google Translate → ElevenLabs TTS → 🎧 Guests hear
-        (English)        (~150ms)         (~50ms)           (~75ms)        (German, Japanese, etc.)
-```
+**Solution:** Added UI for guests to select:
+- **Everyone** - Guide and all guests hear (default)
+- **Guide Only** - Private question to guide
+- **Specific Guest** - Private peer-to-peer message
 
-**Total latency: ~300-500ms** — Fast enough for natural tour narration.
+### 3. ✅ Ambient Noise Filtering
+**Problem:** ElevenLabs Scribe transcribed ambient sounds like "[traffic noise]", "[wind sounds]" etc.
 
-## Tech Stack
+**Solution:** Added noise filtering that:
+- Detects and removes bracketed sound descriptions: `[traffic]`, `(wind)`, `*coughing*`
+- Filters out filler words: "um", "uh", "ah"
+- Validates that transcription contains actual speech content before translating
+- Skips translation entirely if only noise was detected
 
-| Layer | Technology |
-|-------|------------|
-| **Monorepo** | Turborepo + pnpm |
-| **Frontend** | Next.js 14 (App Router) |
-| **Hosting** | Vercel |
-| **Database** | Supabase (PostgreSQL) |
-| **Auth** | Supabase Auth |
-| **Realtime** | Supabase Realtime + LiveKit |
-| **Audio Streaming** | LiveKit Cloud (WebRTC) |
-| **Speech-to-Text** | ElevenLabs Scribe v2 (~150ms) |
-| **Translation** | Google Cloud Translation API |
-| **Text-to-Speech** | ElevenLabs Flash v2.5 (~75ms) |
+---
 
-### Why ElevenLabs?
+## Files to Copy
 
-- **Lower latency**: Scribe v2 (~150ms) + Flash TTS (~75ms) = fastest pipeline
-- **Voice cloning**: Tim's voice can speak German, Japanese, Chinese!
-- **32 languages**: Comprehensive multilingual support
-- **Better quality**: More natural, expressive voices
-
-## Project Structure
+### Web App (Guest Side) - `apps/web/`
 
 ```
-tourlingo/
-├── apps/
-│   ├── web/           # Guest-facing PWA (port 3000)
-│   └── operator/      # Operator dashboard (port 3001)
-├── packages/
-│   ├── ui/            # Shared UI components
-│   ├── api/           # Supabase client & queries
-│   ├── audio/         # LiveKit integration
-│   ├── translation/   # ElevenLabs + Google pipeline
-│   └── types/         # Shared TypeScript types
-└── supabase/
-    ├── migrations/    # Database schema
-    └── seed.sql       # Test data
+apps/web/src/app/tour/[id]/page.tsx          → REPLACE existing file
+apps/web/src/app/api/translate/audio/route.ts → CREATE new file
 ```
 
-## Getting Started
+### Operator App (Guide Side) - `apps/operator/`
 
-### Prerequisites
-
-- Node.js 18+
-- pnpm 8+
-- Supabase CLI
-- Accounts: Supabase, LiveKit, ElevenLabs, Google Cloud
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/your-org/tourlingo.git
-cd tourlingo
-
-# Install dependencies
-pnpm install
-
-# Copy environment variables
-cp .env.example .env.local
-
-# Fill in your API keys in .env.local
-
-# Start Supabase locally (optional)
-supabase start
-
-# Generate database types
-pnpm db:generate
-
-# Run development servers
-pnpm dev
+```
+apps/operator/src/app/(dashboard)/dashboard/tours/[id]/live/page.tsx → REPLACE existing file
+apps/operator/src/app/api/translate/audio/route.ts                    → REPLACE existing file
 ```
 
-### Development URLs
+### Optional: Standalone Noise Filter Module
 
-| App | URL |
-|-----|-----|
-| Guest PWA | http://localhost:3000 |
-| Operator Dashboard | http://localhost:3001 |
-| Supabase Studio | http://localhost:54323 |
+```
+packages/translation/src/noiseFilter.ts → ADD new file (optional, for reference)
+```
+
+---
+
+## How It Works Now
+
+### Guest Speaking Flow
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Guest (German) holds "Talk" button                          │
+│         │                                                    │
+│         ▼                                                    │
+│  ┌────────────────────┐                                     │
+│  │  MediaRecorder     │  Records audio                       │
+│  └──────────┬─────────┘                                     │
+│             │  Release button                                │
+│             ▼                                                │
+│  ┌────────────────────┐                                     │
+│  │  /api/translate/   │                                     │
+│  │     audio          │                                     │
+│  └──────────┬─────────┘                                     │
+│             │                                                │
+│             ▼                                                │
+│  ┌────────────────────┐                                     │
+│  │  ElevenLabs STT    │  "Wo ist die Toilette?"             │
+│  └──────────┬─────────┘                                     │
+│             │                                                │
+│             ▼                                                │
+│  ┌────────────────────┐                                     │
+│  │  Noise Filter      │  Skip if "[traffic noise]" etc      │
+│  └──────────┬─────────┘                                     │
+│             │                                                │
+│             ▼                                                │
+│  ┌────────────────────┐                                     │
+│  │  Google Translate  │  → EN: "Where is the toilet?"       │
+│  │    (Parallel)      │  → IT: "Dov'è il bagno?"            │
+│  └──────────┬─────────┘                                     │
+│             │                                                │
+│             ▼                                                │
+│  ┌────────────────────┐                                     │
+│  │  ElevenLabs TTS    │  Audio for each language            │
+│  └──────────┬─────────┘                                     │
+│             │                                                │
+│             ▼                                                │
+│  Route based on channel:                                     │
+│  • "Guide Only" → EN audio to guide only                    │
+│  • "All"        → All languages to guide + guests           │
+│  • "Guest X"    → Target language to specific guest + guide │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Operator Receiving Translations
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Guest sends translated_audio via LiveKit data channel       │
+│         │                                                    │
+│         ▼                                                    │
+│  Operator receives message with:                             │
+│  • language: "en"                                            │
+│  • text: "Where is the toilet?"                              │
+│  • audioUrl: "data:audio/mp3;base64,..."                    │
+│  • senderName: "Hans"                                        │
+│  • senderLanguage: "de"                                      │
+│  • targetChannel: "guide" or "all"                           │
+│         │                                                    │
+│         ▼                                                    │
+│  Operator UI shows:                                          │
+│  • Yellow alert: "Hans is speaking..."                       │
+│  • Message list with sender flag & name                      │
+│  • Private badge if targetChannel === "guide"                │
+│         │                                                    │
+│         ▼                                                    │
+│  Audio plays automatically in English                        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Noise Filter Examples
+
+| Input (STT Output) | Filtered | Reason |
+|-------------------|----------|--------|
+| `[traffic noise]` | ✅ Filtered | Pure noise description |
+| `Hello [coughing] world` | `Hello world` | Noise removed |
+| `um uh` | ✅ Filtered | Only filler words |
+| `(background music playing)` | ✅ Filtered | Pure noise description |
+| `The bridge is beautiful` | `The bridge is beautiful` | Valid speech |
+| `*wind sounds* Nice view` | `Nice view` | Noise removed |
+
+---
+
+## Testing
+
+1. **Start tour as operator** on operator app
+2. **Join as guest** on web app with a different language (e.g., German)
+3. **Test guide → guests:** Operator broadcasts → Guest hears German translation
+4. **Test guest → guide:** Guest speaks German → Operator hears English translation
+5. **Test channel selection:** Guest selects "Guide Only" → Other guests don't hear
+6. **Test noise filter:** Make ambient noise without speaking → Nothing translates
+
+---
 
 ## Environment Variables
 
-```bash
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+Make sure both apps have these variables set:
 
-# LiveKit (real-time audio streaming)
-NEXT_PUBLIC_LIVEKIT_URL=wss://your-app.livekit.cloud
-LIVEKIT_API_KEY=your-api-key
-LIVEKIT_API_SECRET=your-api-secret
-
-# ElevenLabs (STT + TTS)
-ELEVENLABS_API_KEY=your-elevenlabs-api-key
-ELEVENLABS_VOICE_ID=default-voice-id
-ELEVENLABS_OPERATOR_VOICE_ID=tims-cloned-voice-id  # Optional
-
-# Google Cloud Translation
-GOOGLE_TRANSLATE_API_KEY=your-google-key
-GOOGLE_PROJECT_ID=your-project-id
+```env
+ELEVENLABS_API_KEY=your_key
+GOOGLE_TRANSLATE_API_KEY=your_key
+ELEVENLABS_VOICE_ID=your_voice_id (optional, uses Tim's voice by default)
+NEXT_PUBLIC_LIVEKIT_URL=wss://your-livekit-server
 ```
 
-## Apps
+---
 
-### Guest Web App (`apps/web`)
+## Notes
 
-PWA for tour guests to join tours and receive translated audio.
-
-**Features:**
-- QR code / tour code join flow
-- Language selection (10 languages)
-- Real-time translated audio in earphones
-- Ask questions (translated for all guests)
-- Private chat with operator
-
-### Operator Dashboard (`apps/operator`)
-
-Web app for tour operators to manage tours.
-
-**Features:**
-- Create and manage tours
-- Generate QR codes / join links
-- View connected guests by language
-- Broadcast narration (big red button!)
-- Private communication with guests
-- View archived tours and transcripts
-
-## Packages
-
-### `@tourlingo/translation`
-
-ElevenLabs + Google translation pipeline:
-
-```typescript
-import { processAudioTranslation } from '@tourlingo/translation';
-
-const result = await processAudioTranslation(audioBlob, {
-  sourceLanguage: 'en',
-  targetLanguages: ['de', 'ja', 'zh'],
-  useOperatorVoice: true, // Use Tim's cloned voice!
-  lowLatency: true,       // Use Flash model
-});
-
-// result.translations['de'].audioUrl → German audio
-// result.translations['ja'].audioUrl → Japanese audio
-```
-
-### `@tourlingo/audio`
-
-LiveKit integration for WebRTC audio streaming:
-
-```typescript
-import { useTourRoom, useOperatorBroadcast } from '@tourlingo/audio';
-
-// In operator app
-const { isBroadcasting, toggleBroadcast } = useOperatorBroadcast(roomName);
-
-// In guest app
-const { audioTrack, isMuted, toggleMute } = useGuestAudio(roomName);
-```
-
-### `@tourlingo/api`
-
-Supabase client and database queries:
-
-```typescript
-import { getTourByCode, addParticipant } from '@tourlingo/api';
-
-const tour = await getTourByCode('ABC123');
-await addParticipant(tour.id, { name: 'Yuki', language: 'ja' });
-```
-
-### `@tourlingo/types`
-
-Shared TypeScript types:
-
-```typescript
-import { Tour, Participant, SUPPORTED_LANGUAGES } from '@tourlingo/types';
-```
-
-### `@tourlingo/ui`
-
-Shared React components with Tailwind CSS.
-
-## Scripts
-
-```bash
-# Development
-pnpm dev              # Start all apps
-pnpm dev:web          # Start guest app only
-pnpm dev:operator     # Start operator app only
-
-# Build
-pnpm build            # Build all apps
-pnpm typecheck        # Type check all packages
-pnpm lint             # Lint all packages
-
-# Database
-pnpm db:generate      # Generate Supabase types
-pnpm db:migrate       # Push migrations
-pnpm db:reset         # Reset database
-pnpm db:seed          # Seed database
-
-# Utilities
-pnpm clean            # Clean all build artifacts
-pnpm format           # Format code with Prettier
-```
-
-## Supported Languages
-
-| Flag | Language | Code |
-|------|----------|------|
-| 🇬🇧 | English | en |
-| 🇩🇪 | German | de |
-| 🇯🇵 | Japanese | ja |
-| 🇨🇳 | Chinese (Simplified) | zh |
-| 🇰🇷 | Korean | ko |
-| 🇫🇷 | French | fr |
-| 🇪🇸 | Spanish | es |
-| 🇮🇹 | Italian | it |
-| 🇵🇹 | Portuguese | pt |
-| 🇳🇱 | Dutch | nl |
-
-## Cost Estimates
-
-| Service | Per Tour Hour (10 guests, 10 languages) |
-|---------|----------------------------------------|
-| ElevenLabs STT | ~$0.50 |
-| Google Translate | ~$1.80 |
-| ElevenLabs TTS | ~$2.50 |
-| **Total** | **~$4.80/hour** |
-
-*Prices may vary based on plan and usage.*
-
-## Deployment
-
-### Vercel
-
-Both apps are configured for automatic deployment:
-
-1. Connect GitHub repository to Vercel
-2. Configure environment variables in Vercel dashboard
-3. Deploy
-
-### Supabase
-
-1. Create a new Supabase project
-2. Run migrations in SQL Editor (copy from `supabase/migrations/`)
-3. Update environment variables with production keys
-
-### ElevenLabs Voice Clone (Optional)
-
-To clone the operator's voice:
-
-1. Record 3-5 minutes of operator speaking clearly
-2. Upload to ElevenLabs Voice Lab
-3. Copy voice ID to `ELEVENLABS_OPERATOR_VOICE_ID`
-4. Guests now hear the operator's voice in their language!
-
-## License
-
-Proprietary - All rights reserved
+- The noise filter is **rule-based** for speed (no API calls)
+- LLM-based filtering is available in `noiseFilter.ts` if higher accuracy is needed
+- Channel selection uses LiveKit's `destinationIdentities` for targeted messaging
+- Audio is sent as base64 data URLs to work within LiveKit's data channel limits
+- Large audio payloads are chunked to stay under 64KB per message

@@ -10,7 +10,7 @@ import {
   useTracks,
   AudioTrack,
 } from '@livekit/components-react';
-import { Track, RoomEvent } from 'livekit-client';
+import { Track, RoomEvent, DataPacket_Kind } from 'livekit-client';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Mic,
@@ -25,6 +25,7 @@ import {
   Loader2,
   Volume2,
   MessageCircle,
+  Lock,
 } from 'lucide-react';
 import { SUPPORTED_LANGUAGES } from '@tourlingo/types';
 import { createBrowserClient } from '@supabase/ssr';
@@ -36,8 +37,7 @@ function getSupabase() {
   );
 }
 
-// Max chunk size for LiveKit data channel (leave room for JSON wrapper)
-const MAX_CHUNK_SIZE = 50000; // ~50KB to be safe under 64KB limit
+const MAX_CHUNK_SIZE = 50000;
 
 export default function LiveTourPage() {
   const params = useParams();
@@ -167,15 +167,22 @@ export default function LiveTourPage() {
   );
 }
 
+// Message from guest
+interface GuestMessage {
+  senderName: string;
+  senderLanguage: string;
+  text: string;
+  isPrivate: boolean;
+  timestamp: number;
+}
+
 function LiveTourContent({ tour }: { tour: any }) {
   const router = useRouter();
   const room = useRoomContext();
   const { localParticipant } = useLocalParticipant();
   const participants = useParticipants();
 
-  // Get all audio tracks from guests
-  const audioTracks = useTracks([Track.Source.Microphone]);
-
+  // State
   const [isBroadcasting, setIsBroadcasting] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -183,12 +190,19 @@ function LiveTourContent({ tour }: { tour: any }) {
   const [selectedGuest, setSelectedGuest] = useState<string | null>(null);
   const [lastTranscript, setLastTranscript] = useState('');
   const [translationError, setTranslationError] = useState<string | null>(null);
-  const [speakingGuests, setSpeakingGuests] = useState<Set<string>>(new Set());
+  
+  // Guest messages state
+  const [guestMessages, setGuestMessages] = useState<GuestMessage[]>([]);
+  const [isPlayingGuestAudio, setIsPlayingGuestAudio] = useState(false);
+  const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null);
 
-  // Audio recording refs
+  // Audio refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const guestAudioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const guestAudioQueueRef = useRef<{ audioUrl: string; senderName: string }[]>([]);
+  const chunkBufferRef = useRef<Map<string, { chunks: string[]; total: number }>>(new Map());
 
   const joinUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://tour-lingo.vercel.app'}/join/${tour.accessCode}`;
 
@@ -200,30 +214,6 @@ function LiveTourContent({ tour }: { tour: any }) {
       return true;
     }
   });
-
-  // Get guest audio tracks (non-operator)
-  const guestAudioTracks = audioTracks.filter((trackRef) => {
-    const participant = trackRef.participant;
-    try {
-      const meta = JSON.parse(participant.metadata || '{}');
-      return !meta.isOperator;
-    } catch {
-      return true;
-    }
-  });
-
-  // Track which guests are speaking based on audio tracks
-  useEffect(() => {
-    const newSpeakingGuests = new Set<string>();
-
-    guestAudioTracks.forEach((trackRef) => {
-      if (trackRef.publication?.isMuted === false) {
-        newSpeakingGuests.add(trackRef.participant.identity);
-      }
-    });
-
-    setSpeakingGuests(newSpeakingGuests);
-  }, [guestAudioTracks]);
 
   const guestsByLanguage = guests.reduce((acc, guest) => {
     try {
@@ -238,39 +228,135 @@ function LiveTourContent({ tour }: { tour: any }) {
     return acc;
   }, {} as Record<string, any[]>);
 
-  // Get unique languages from connected guests
   const activeLanguages = Object.keys(guestsByLanguage);
 
-  // Get speaking guest info
-  const speakingGuestInfo = Array.from(speakingGuests).map(identity => {
-    const guest = guests.find(g => g.identity === identity);
-    if (!guest) return null;
-    try {
-      const meta = JSON.parse(guest.metadata || '{}');
-      const lang = SUPPORTED_LANGUAGES.find(l => l.code === meta.language);
-      return {
-        name: guest.name || identity,
-        language: lang?.name || meta.language,
-        flag: lang?.flag || '🌐',
-      };
-    } catch {
-      return { name: guest.name || identity, language: 'Unknown', flag: '🌐' };
-    }
-  }).filter(Boolean);
+  // Listen for translated audio from guests
+  useEffect(() => {
+    if (!room) return;
 
-  // Send data in chunks to avoid LiveKit's 64KB limit
+    const handleData = async (
+      payload: Uint8Array,
+      participant: any,
+      kind: DataPacket_Kind
+    ) => {
+      try {
+        const decoder = new TextDecoder();
+        const jsonStr = decoder.decode(payload);
+        const message = JSON.parse(jsonStr);
+
+        // Handle chunked messages
+        if (message.type === 'audio_chunk') {
+          const { messageId, chunkIndex, totalChunks, data } = message;
+
+          if (!chunkBufferRef.current.has(messageId)) {
+            chunkBufferRef.current.set(messageId, {
+              chunks: new Array(totalChunks).fill(null),
+              total: totalChunks,
+            });
+          }
+
+          const buffer = chunkBufferRef.current.get(messageId)!;
+          buffer.chunks[chunkIndex] = data;
+
+          if (buffer.chunks.every((c) => c !== null)) {
+            const fullJson = buffer.chunks.join('');
+            const fullMessage = JSON.parse(fullJson);
+            chunkBufferRef.current.delete(messageId);
+            await processGuestMessage(fullMessage, participant);
+          }
+          return;
+        }
+
+        // Handle direct messages
+        if (message.type === 'translated_audio') {
+          await processGuestMessage(message, participant);
+        }
+      } catch (err) {
+        console.error('Error processing data:', err);
+      }
+    };
+
+    room.on(RoomEvent.DataReceived, handleData);
+    return () => {
+      room.off(RoomEvent.DataReceived, handleData);
+    };
+  }, [room]);
+
+  // Process translated message from guest
+  const processGuestMessage = async (message: any, participant: any) => {
+    // Only process English translations (operator's language)
+    if (message.language !== 'en') return;
+
+    const isPrivate = message.targetChannel === 'guide';
+    const senderLang = SUPPORTED_LANGUAGES.find(l => l.code === message.senderLanguage);
+
+    console.log(`Received from ${message.senderName} (${senderLang?.name || message.senderLanguage}): "${message.text?.substring(0, 50)}..."`);
+
+    // Add to messages list
+    const guestMessage: GuestMessage = {
+      senderName: message.senderName || participant?.name || 'Guest',
+      senderLanguage: message.senderLanguage || 'unknown',
+      text: message.text || '',
+      isPrivate,
+      timestamp: message.timestamp || Date.now(),
+    };
+
+    setGuestMessages(prev => [guestMessage, ...prev].slice(0, 10)); // Keep last 10
+
+    // Queue audio for playback
+    if (message.audioUrl) {
+      guestAudioQueueRef.current.push({
+        audioUrl: message.audioUrl,
+        senderName: guestMessage.senderName,
+      });
+      playNextGuestAudio();
+    }
+  };
+
+  // Play guest audio queue
+  const playNextGuestAudio = () => {
+    if (isPlayingGuestAudio || guestAudioQueueRef.current.length === 0) return;
+
+    const next = guestAudioQueueRef.current.shift();
+    if (!next) return;
+
+    setIsPlayingGuestAudio(true);
+    setCurrentSpeaker(next.senderName);
+
+    if (!guestAudioPlayerRef.current) {
+      guestAudioPlayerRef.current = new Audio();
+      guestAudioPlayerRef.current.onended = () => {
+        setIsPlayingGuestAudio(false);
+        setCurrentSpeaker(null);
+        playNextGuestAudio();
+      };
+      guestAudioPlayerRef.current.onerror = () => {
+        setIsPlayingGuestAudio(false);
+        setCurrentSpeaker(null);
+        playNextGuestAudio();
+      };
+    }
+
+    guestAudioPlayerRef.current.src = next.audioUrl;
+    guestAudioPlayerRef.current.play().catch((err) => {
+      console.error('Guest audio play error:', err);
+      setIsPlayingGuestAudio(false);
+      setCurrentSpeaker(null);
+      playNextGuestAudio();
+    });
+  };
+
+  // Send data in chunks
   const sendChunkedData = useCallback(async (data: object) => {
     const jsonStr = JSON.stringify(data);
     const encoder = new TextEncoder();
 
-    // If small enough, send directly
     if (jsonStr.length < MAX_CHUNK_SIZE) {
       const encoded = encoder.encode(jsonStr);
       await room.localParticipant.publishData(encoded, { reliable: true });
       return;
     }
 
-    // Otherwise, chunk it
     const messageId = Date.now().toString();
     const totalChunks = Math.ceil(jsonStr.length / MAX_CHUNK_SIZE);
 
@@ -285,16 +371,14 @@ function LiveTourContent({ tour }: { tour: any }) {
       };
       const encoded = encoder.encode(JSON.stringify(chunkMessage));
       await room.localParticipant.publishData(encoded, { reliable: true });
-
-      // Small delay between chunks to avoid overwhelming
       await new Promise(resolve => setTimeout(resolve, 10));
     }
   }, [room]);
 
-  // Process and send translated audio to guests
+  // Process and send translation
   const processAndSendTranslation = useCallback(async (audioBlob: Blob) => {
-    if (audioBlob.size < 1000) return; // Skip tiny chunks
-    if (activeLanguages.length === 0) return; // No guests
+    if (audioBlob.size < 1000) return;
+    if (activeLanguages.length === 0) return;
 
     setIsTranslating(true);
     setTranslationError(null);
@@ -305,6 +389,7 @@ function LiveTourContent({ tour }: { tour: any }) {
       formData.append('sourceLanguage', 'en');
       formData.append('targetLanguages', activeLanguages.join(','));
       formData.append('generateAudio', 'true');
+      formData.append('enableNoiseFilter', 'true');
 
       const response = await fetch('/api/translate/audio', {
         method: 'POST',
@@ -318,11 +403,17 @@ function LiveTourContent({ tour }: { tour: any }) {
 
       const result = await response.json();
 
+      // If filtered as noise, don't send
+      if (result.filtered && result.filterReason === 'noise') {
+        console.log('Audio filtered as noise');
+        return;
+      }
+
       if (result.originalText) {
         setLastTranscript(result.originalText);
       }
 
-      // Send translated audio to guests via LiveKit data channel
+      // Send translations to guests
       for (const [language, translation] of Object.entries(result.translations)) {
         const trans = translation as { text: string; audioUrl?: string };
         if (trans.audioUrl) {
@@ -351,13 +442,10 @@ function LiveTourContent({ tour }: { tour: any }) {
     }
   }, [activeLanguages, sendChunkedData]);
 
-  // Start recording and translation
+  // Start broadcasting
   const startBroadcasting = useCallback(async () => {
     try {
-      // Enable microphone in LiveKit (for raw audio fallback)
       await localParticipant.setMicrophoneEnabled(true);
-
-      // Get microphone stream for recording
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const mediaRecorder = new MediaRecorder(stream, {
@@ -381,10 +469,8 @@ function LiveTourContent({ tour }: { tour: any }) {
         }
       };
 
-      // Start recording
       mediaRecorder.start();
 
-      // Process audio every 3 seconds for translation
       recordingIntervalRef.current = setInterval(() => {
         if (mediaRecorder.state === 'recording') {
           mediaRecorder.stop();
@@ -399,22 +485,18 @@ function LiveTourContent({ tour }: { tour: any }) {
     }
   }, [localParticipant, processAndSendTranslation]);
 
-  // Stop recording and translation
+  // Stop broadcasting
   const stopBroadcasting = useCallback(async () => {
-    // Stop interval
     if (recordingIntervalRef.current) {
       clearInterval(recordingIntervalRef.current);
       recordingIntervalRef.current = null;
     }
 
-    // Stop media recorder
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
 
-    // Disable microphone
     await localParticipant.setMicrophoneEnabled(false);
-
     setIsBroadcasting(false);
   }, [localParticipant]);
 
@@ -454,7 +536,7 @@ function LiveTourContent({ tour }: { tour: any }) {
     }
   };
 
-  // Cleanup on unmount
+  // Cleanup
   useEffect(() => {
     return () => {
       if (recordingIntervalRef.current) {
@@ -463,41 +545,49 @@ function LiveTourContent({ tour }: { tour: any }) {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         mediaRecorderRef.current.stop();
       }
+      if (guestAudioPlayerRef.current) {
+        guestAudioPlayerRef.current.pause();
+      }
     };
   }, []);
 
   return (
     <div className="min-h-[calc(100vh-8rem)] flex flex-col lg:flex-row gap-6">
-      {/* Play guest audio for the operator to hear */}
-      <div className="hidden">
-        {guestAudioTracks.map((trackRef) => (
-          <AudioTrack
-            key={trackRef.publication?.trackSid}
-            trackRef={trackRef}
-            volume={1}
-          />
-        ))}
-      </div>
-
       {/* Main Control Panel */}
       <div className="flex-1 space-y-6">
         {/* Guest Speaking Alert */}
-        {speakingGuestInfo.length > 0 && (
-          <div className="bg-yellow-50 border border-yellow-300 rounded-xl p-4 animate-pulse">
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 bg-yellow-400 rounded-full flex items-center justify-center">
-                <MessageCircle className="w-5 h-5 text-yellow-900" />
+        {(isPlayingGuestAudio || guestMessages.length > 0) && (
+          <div className={`rounded-xl p-4 ${isPlayingGuestAudio ? 'bg-yellow-50 border border-yellow-300 animate-pulse' : 'bg-gray-50'}`}>
+            <div className="flex items-center space-x-3 mb-3">
+              <div className={`w-10 h-10 rounded-full flex items-center justify-center ${isPlayingGuestAudio ? 'bg-yellow-400' : 'bg-gray-300'}`}>
+                <MessageCircle className={`w-5 h-5 ${isPlayingGuestAudio ? 'text-yellow-900' : 'text-gray-600'}`} />
               </div>
               <div>
-                <p className="font-semibold text-yellow-900">Guest Speaking!</p>
-                <div className="flex flex-wrap gap-2 mt-1">
-                  {speakingGuestInfo.map((guest, i) => (
-                    <span key={i} className="text-sm text-yellow-800 bg-yellow-200 px-2 py-0.5 rounded-full">
-                      {guest?.flag} {guest?.name} ({guest?.language})
-                    </span>
-                  ))}
-                </div>
+                <p className={`font-semibold ${isPlayingGuestAudio ? 'text-yellow-900' : 'text-gray-700'}`}>
+                  {isPlayingGuestAudio ? `${currentSpeaker} is speaking...` : 'Recent Guest Messages'}
+                </p>
               </div>
+            </div>
+
+            {/* Recent messages */}
+            <div className="space-y-2 max-h-32 overflow-y-auto">
+              {guestMessages.slice(0, 3).map((msg, i) => {
+                const lang = SUPPORTED_LANGUAGES.find(l => l.code === msg.senderLanguage);
+                return (
+                  <div key={msg.timestamp + i} className="flex items-start space-x-2 text-sm">
+                    <span>{lang?.flag || '🌐'}</span>
+                    <div className="flex-1">
+                      <span className="font-medium text-gray-700">{msg.senderName}</span>
+                      {msg.isPrivate && (
+                        <span className="ml-2 text-xs bg-yellow-200 text-yellow-800 px-1.5 py-0.5 rounded">
+                          <Lock className="w-3 h-3 inline mr-0.5" />Private
+                        </span>
+                      )}
+                      <p className="text-gray-600">{msg.text}</p>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -669,30 +759,16 @@ function LiveTourContent({ tour }: { tour: any }) {
                       </span>
                     </div>
                     <div className="space-y-1 pl-7">
-                      {langGuests.map((guest: any) => {
-                        const isSpeaking = speakingGuests.has(guest.identity);
-                        return (
-                          <button
-                            key={guest.identity}
-                            onClick={() => setSelectedGuest(guest.identity)}
-                            className={`w-full flex items-center justify-between py-1.5 px-2 rounded text-sm transition-colors ${
-                              isSpeaking 
-                                ? 'bg-yellow-100 border border-yellow-300' 
-                                : 'hover:bg-gray-100'
-                            }`}
-                          >
-                            <div className="flex items-center space-x-2">
-                              {isSpeaking && (
-                                <Volume2 className="w-4 h-4 text-yellow-600 animate-pulse" />
-                              )}
-                              <span className={isSpeaking ? 'text-yellow-800 font-medium' : ''}>
-                                {guest.name}
-                              </span>
-                            </div>
-                            <ChevronRight className="w-4 h-4 text-gray-400" />
-                          </button>
-                        );
-                      })}
+                      {langGuests.map((guest: any) => (
+                        <button
+                          key={guest.identity}
+                          onClick={() => setSelectedGuest(guest.identity)}
+                          className="w-full flex items-center justify-between py-1.5 px-2 rounded text-sm hover:bg-gray-100 transition-colors"
+                        >
+                          <span>{guest.name}</span>
+                          <ChevronRight className="w-4 h-4 text-gray-400" />
+                        </button>
+                      ))}
                     </div>
                   </div>
                 );
@@ -736,7 +812,7 @@ function LiveTourContent({ tour }: { tour: any }) {
               </button>
             </div>
             <p className="text-gray-600 mb-4">
-              Private messaging coming soon.
+              Private messaging to specific guests coming soon.
             </p>
             <button
               onClick={() => setSelectedGuest(null)}
