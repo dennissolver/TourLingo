@@ -236,8 +236,8 @@ function LiveTourContent({ tour }: { tour: any }) {
 
     const handleData = async (
       payload: Uint8Array,
-      participant: any,
-      kind: DataPacket_Kind
+      participant?: any,
+      kind?: DataPacket_Kind
     ) => {
       try {
         const decoder = new TextDecoder();
